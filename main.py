@@ -3,6 +3,7 @@ import socket
 from dotenv import load_dotenv
 import os
 import sys
+import json
 
 load_dotenv()
 
@@ -43,9 +44,7 @@ def basic_consume_loop(consumer, topics):
                 elif msg.error():
                     raise KafkaException(msg.error())
             else:
-                key = msg.key().decode("utf-8") if msg.key() else None
-                value = msg.value().decode("utf-8") if msg.value() else None
-                print(f"Consumed message: key={key}, value={value}")
+                process_message(msg)
     finally:
         # Close down consumer to commit final offsets.
         consumer.close()
@@ -53,6 +52,30 @@ def basic_consume_loop(consumer, topics):
 
 def shutdown():
     running = False
+
+
+def process_message(kafka_msg):
+    # 1. Parse the outer wrapper
+    data = json.loads(kafka_msg.value())
+
+    # 2. Extract and parse the inner 'bytes' string
+    inner_payload = json.loads(data["bytes"])
+
+    # 3. Access the 'uR' (Update Record)
+    update = inner_payload.get("uR", {})
+
+    if "TS" in update:
+        train_id = update["TS"]["rid"]
+        location_data = update["TS"].get("Location", {})
+        if isinstance(location_data, list):
+            tiploc = location_data[0].get("tpl") if location_data else "Unknown"
+        else:
+            tiploc = location_data.get("tpl")
+
+        # Check if it's an arrival, departure, or pass
+        event_type = "PASS" if "pass" in location_data else "STOP"
+
+        print(f"Train {train_id} just {event_type}ed {tiploc}")
 
 
 if __name__ == "__main__":
