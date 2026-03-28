@@ -1,0 +1,50 @@
+{
+  "key": {
+    "messageID": "ID:liv1-dwnpp102-49747-638894340902160133-1:22:1:1:472880906"
+  },
+  "value": {
+    "destination": {
+      "name": "Consumer.rdmportal.VirtualTopic.PushPort-v18",
+      "destinationType": "queue"
+    },
+    "messageID": "ID:liv1-dwnpp102-49747-638894340902160133-1:22:1:1:472880906",
+    "type": null,
+    "priority": 5,
+    "redelivered": false,
+    "messageType": "bytes",
+    "deliveryMode": 1,
+    "bytes": "{\"ts\":\"2026-03-27T10:44:18.8741331+00:00\",\"version\":\"18.0\",\"uR\":{\"updateOrigin\":\"TD\",\"TS\":{\"rid\":\"202603278702610\",\"uid\":\"W02610\",\"ssd\":\"2026-03-27\",\"Location\":{\"tpl\":\"LEDBRNJ\",\"wtp\":\"10:35:30\",\"pass\":{\"et\":\"10:46\",\"src\":\"TD\"}}}}}",
+    "replyTo": null,
+    "correlationID": null,
+    "expiration": 1774608858876,
+    "text": null,
+    "map": null,
+    "properties": {
+      "Username": {
+        "boolean": null,
+        "string": "thales",
+        "byte": null,
+        "double": null,
+        "bytes": null,
+        "propertyType": "string",
+        "short": null,
+        "integer": null,
+        "float": null,
+        "long": null
+      },
+      "PushPortSequence": {
+        "boolean": null,
+        "string": "2880905",
+        "byte": null,
+        "double": null,
+        "bytes": null,
+        "propertyType": "string",
+        "short": null,
+        "integer": null,
+        "float": null,
+        "long": null
+      }
+    },
+    "timestamp": 1774608258876
+  }
+}
