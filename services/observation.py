@@ -4,65 +4,32 @@ import json
 from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass
+from pydantic import ValidationError
+
+from services.models import TrainUpdate, TrainLocation
 
 
 @dataclass
-class TrainEvent:
-    train_id: str
-    tiploc: str | None
-    location_name: str | None
-    event_type: EventType
-    timestamp: str
+class Journey:
+    uid: str
+    rid: str
+    location_history: list[TrainLocation]
 
 
 class EventType(Enum):
+    """Enum for train event types.
+
+    PASS: Train is passing through the location without stopping.
+    STOP: Train is stopping at the location.
+    """
+
     PASS = "PASS"
     STOP = "STOP"
 
 
-class MessageParser:
-    """Parser for Kafka messages containing train information."""
-
-    def __init__(self, tiploc_mapper: LocationMapper):
-        self.tiploc_mapper = tiploc_mapper
-
-    def parse_message(self, kafka_msg) -> TrainEvent | None:
-        """Parses a Kafka message and extracts train ID, tiploc, and event type."""
-        # 1. Parse the outer wrapper
-        data = json.loads(kafka_msg.value())
-
-        # 2. Extract and parse the inner 'bytes' string
-        inner_payload = json.loads(data["bytes"])
-
-        # 3. Access the 'uR' (Update Record)
-        update = inner_payload.get("uR", {})
-
-        if "TS" in update:
-            train_id = update["TS"]["rid"]
-            location_data = update["TS"].get("Location", {})
-            if isinstance(location_data, list):
-                tiploc = location_data[0].get("tpl") if location_data else None
-            else:
-                tiploc = location_data.get("tpl")
-
-            # Check if it's an arrival/departure, or pass
-            event_type = EventType.PASS if "pass" in location_data else EventType.STOP
-            location_name = (
-                self.tiploc_mapper.tiploc_to_location(tiploc) if tiploc else None
-            )
-
-            return TrainEvent(
-                train_id=train_id,
-                tiploc=tiploc,
-                location_name=location_name,
-                event_type=event_type,
-                timestamp=data.get("timestamp", ""),
-            )
-
-        return None
-
-
 class LocationMapper:
+    """Mapper for converting TIPLOC codes to human-readable location names."""
+
     def __init__(self, corpus_path: str | Path):
         self.corpus_path = corpus_path
         self.tiploc_data = self.load_corpus()
@@ -84,15 +51,74 @@ class LocationMapper:
         return None
 
 
+class MessageParser:
+    """Converts Kafka message to TrainUpdate objects, using a LocationMapper to resolve TIPLOC codes to location names."""
+
+    def __init__(self, tiploc_mapper: LocationMapper):
+        self.tiploc_mapper = tiploc_mapper
+
+    def parse_message(self, kafka_msg) -> TrainUpdate | None:
+        """Parses a Kafka message and extracts train ID, tiploc, and event type packaged as a TrainUpdate."""
+        # 1. Parse the outer wrapper
+        data = json.loads(kafka_msg.value())
+
+        # 2. Extract and parse the inner 'bytes' string
+        inner_payload = json.loads(data["bytes"])
+
+        # 3. Access the 'uR' (Update Record)
+        update_record = inner_payload.get("uR", {})
+
+        # 4. Get the Train Status (ts) data
+        ts_data = update_record.get("TS", {})
+        if not ts_data:
+            print("No 'TS' data found in message")
+            return None
+
+        try:
+            return TrainUpdate(**ts_data)
+        except ValidationError as exc:
+            print(f"Skipping malformed train update: {exc}")
+            return None
+
+
+class Watchlist:
+    """Maintains a watchlist of train IDs and their associated event types."""
+
+    def __init__(self, subscribed_trains: list[str]):
+        self.watchlist: dict[str, Journey] = {
+            uid: Journey(uid=uid, rid="", location_history=[])
+            for uid in subscribed_trains
+        }
+
+    def update_watchlist(self, train_update: TrainUpdate):
+        """Updates the watchlist with the latest train update information."""
+        if train_update.uid in self.watchlist:
+            # Update existing entry or create a new one
+            self.watchlist[train_update.uid].rid = train_update.rid
+            self.watchlist[train_update.uid].location_history.extend(
+                train_update.location
+            )  # Append new location info
+            return self.watchlist[
+                train_update.uid
+            ]  # Read-only Journey object for external use
+
+
 class Observer:
     """Observer for consuming Kafka messages and processing train information."""
 
-    def __init__(self, consumer: Consumer, topic: str, processor: MessageParser):
+    def __init__(
+        self,
+        consumer: Consumer,
+        topic: str,
+        processor: MessageParser,
+        watchlist: Watchlist,
+    ):
         self.consumer = consumer
         self.topic = topic
         self.running = True
 
         self.processor = processor
+        self.watchlist = watchlist
 
     def subscribe(self):
         if self.topic:
@@ -125,7 +151,9 @@ class Observer:
                         raise KafkaException(msg_error)
                 else:
                     train_event = self.processor.parse_message(msg)
-                    print(train_event)
+                    if train_event is None:
+                        continue
+                    self.watchlist.update_watchlist(train_event)
         finally:
             # Close down consumer to commit final offsets.
             self.consumer.close()

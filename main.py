@@ -2,8 +2,18 @@ from confluent_kafka import Consumer, KafkaException, KafkaError
 from dotenv import load_dotenv
 import os
 from pathlib import Path
+import logging
 
-from services.observation import MessageParser, LocationMapper, Observer
+from services.load_user_settings import load_user_settings
+from services.observation import MessageParser, LocationMapper, Observer, Watchlist
+
+log_folder = Path("logs")
+log_folder.mkdir(exist_ok=True)
+log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+logging.basicConfig(
+    filename=log_folder / "app.log", level=logging.INFO, format=log_format
+)
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -27,13 +37,17 @@ def main():
         tiploc_mapper = LocationMapper(corpus_path)
         message_parser = MessageParser(tiploc_mapper)
 
+        user_settings = load_user_settings(str(os.getenv("USER_SETTINGS_PATH")))
+
+        watchlist = Watchlist(user_settings.get("saved_trains", []))
         # Create the Observer and start consuming messages
-        observer = Observer(consumer, topic, message_parser)
+        observer = Observer(consumer, topic, message_parser, watchlist)
         observer.consume()
+
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
 
 
 if __name__ == "__main__":
