@@ -6,6 +6,9 @@ from enum import Enum
 from dataclasses import dataclass
 from pydantic import ValidationError
 
+from logging import getLogger
+
+logger = getLogger(__name__)
 from services.models import TrainUpdate, TrainLocation
 
 
@@ -71,36 +74,52 @@ class MessageParser:
         # 4. Get the Train Status (ts) data
         ts_data = update_record.get("TS", {})
         if not ts_data:
-            print("No 'TS' data found in message")
+            logger.info("No TS data found in message, skipping.")
             return None
 
         try:
             return TrainUpdate(**ts_data)
         except ValidationError as exc:
-            print(f"Skipping malformed train update: {exc}")
+            logger.warning(f"Skipping malformed train update: {exc}")
             return None
 
 
 class Watchlist:
-    """Maintains a watchlist of train IDs and their associated event types."""
+    """Maintains watchlists for user subscriptions."""
 
-    def __init__(self, subscribed_trains: list[str]):
-        self.watchlist: dict[str, Journey] = {
+    def __init__(
+        self, subscribed_trains: list[str], favourite_stations: list[str] = []
+    ):
+        self.station_watchlist: dict[str, list[TrainUpdate]] = {
+            station: [] for station in favourite_stations
+        }
+        self.train_watchlist: dict[str, Journey] = {
             uid: Journey(uid=uid, rid="", location_history=[])
             for uid in subscribed_trains
         }
 
-    def update_watchlist(self, train_update: TrainUpdate):
-        """Updates the watchlist with the latest train update information."""
-        if train_update.uid in self.watchlist:
+    def update_watchlists(self, train_update: TrainUpdate):
+        """Updates the watchlists with the latest train update information."""
+
+        if train_update.uid in self.train_watchlist:  # live train update
             # Update existing entry or create a new one
-            self.watchlist[train_update.uid].rid = train_update.rid
-            self.watchlist[train_update.uid].location_history.extend(
+            self.train_watchlist[train_update.uid].rid = train_update.rid
+            self.train_watchlist[train_update.uid].location_history.extend(
                 train_update.location
             )  # Append new location info
-            return self.watchlist[
+            return self.train_watchlist[
                 train_update.uid
             ]  # Read-only Journey object for external use
+
+        stations_intersect = set([loc.tiploc for loc in train_update.location]) & set(
+            self.station_watchlist.keys()
+        )  # station update for a train we're not tracking, but we care about the station
+        if stations_intersect:
+            for loc in stations_intersect:
+                self.station_watchlist[loc].append(train_update)
+                print(
+                    f"Train {train_update.rid} ({train_update.uid}) has an update for station {loc}"
+                )
 
 
 class Observer:
@@ -153,7 +172,7 @@ class Observer:
                     train_event = self.processor.parse_message(msg)
                     if train_event is None:
                         continue
-                    self.watchlist.update_watchlist(train_event)
+                    self.watchlist.update_watchlists(train_event)
         finally:
             # Close down consumer to commit final offsets.
             self.consumer.close()

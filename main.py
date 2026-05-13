@@ -39,7 +39,10 @@ def main():
 
         user_settings = load_user_settings(str(os.getenv("USER_SETTINGS_PATH")))
 
-        watchlist = Watchlist(user_settings.get("saved_trains", []))
+        watchlist = Watchlist(
+            user_settings.get("saved_trains", []),
+            user_settings.get("favourite_stations", []),
+        )
         # Create the Observer and start consuming messages
         observer = Observer(consumer, topic, message_parser, watchlist)
         observer.consume()
