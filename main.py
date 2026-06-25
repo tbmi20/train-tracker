@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 import logging
 
-from services.load_user_settings import load_user_settings
-from services.observation import MessageParser, LocationMapper, Observer, Watchlist
+from services.load_data import load_user_settings, load_timetable
+from services.database import Database
+from services.observation import MessageParser, Observer, Watchlist
 
 log_folder = Path("logs")
 log_folder.mkdir(exist_ok=True)
@@ -20,6 +21,22 @@ def main():
     try:
         load_dotenv()
 
+        # TODO: Eventually separate this so the rest of the app runs while user settings and timetables are refreshed
+        # Get environment variables for timetable
+        timetable_path = str(os.getenv("TIMETABLE_PATH"))
+        database_path = str(os.getenv("DB_PATH"))
+
+        # Load tiploc map and schedule from the weekly timetable into db
+        load_timetable(timetable_path, Database(database_path))
+
+        # Get user specified settings for saved trains and favourite stations
+        user_settings_path = str(os.getenv("USER_SETTINGS_PATH"))
+        user_settings = load_user_settings(user_settings_path)
+
+        saved_trains = user_settings.get("saved_trains", [])  # [(TIPLOC, UID), ...]
+
+        # Set up Kafka consumer configuration
+
         conf = {
             "bootstrap.servers": os.getenv("KAFKA_BOOTSTRAP_SERVERS"),
             "security.protocol": os.getenv("KAFKA_SECURITY_PROTOCOL"),
@@ -32,17 +49,9 @@ def main():
         }
         consumer = Consumer(conf)
         topic = str(os.getenv("JSON_TOPIC"))
-        corpus_path = Path(str(os.getenv("TIPLOC_CORPUS_PATH")))
 
-        tiploc_mapper = LocationMapper(corpus_path)
-        message_parser = MessageParser(tiploc_mapper)
+        message_parser = MessageParser()
 
-        user_settings = load_user_settings(str(os.getenv("USER_SETTINGS_PATH")))
-
-        watchlist = Watchlist(
-            user_settings.get("saved_trains", []),
-            user_settings.get("favourite_stations", []),
-        )
         # Create the Observer and start consuming messages
         observer = Observer(consumer, topic, message_parser, watchlist)
         observer.consume()

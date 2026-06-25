@@ -1,12 +1,53 @@
-"""Models for train updates and locations from Kafka messages."""
+"""Models for structuring data from both internal and external sources."""
 
 from pydantic import BaseModel, Field, field_validator
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional, List, Union
+import json
 import logging
 
 logger = logging.getLogger(__name__)
 
 
+# Internal models
+@dataclass
+class UserSettings:
+    """Represents user settings for saved trains and favourite stations."""
+
+    saved_trains: list[SavedTrain] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> UserSettings:
+        return cls(
+            saved_trains=[
+                SavedTrain(**train) for train in data.get("saved_trains", [])
+            ],
+        )
+
+    @classmethod
+    def to_json(cls, settings: UserSettings) -> str:
+        return json.dumps(
+            {
+                "saved_trains": [train.to_dict() for train in settings.saved_trains],
+            }
+        )
+
+
+@dataclass
+class SavedTrain:
+    """Represents a train that a user has saved for tracking."""
+
+    # TODO: the uid doesn't specify a train so might need more info
+    tiploc: str
+    uid: str
+
+    @classmethod
+    def to_dict(cls) -> dict[str, str]:
+        return {"tiploc": cls.tiploc, "uid": cls.uid}
+
+
+# Pydantic models for Kafka messages
 class TrainLocation(BaseModel):
     # Mapping the short Darwin keys to readable names
     tiploc: str = Field(alias="tpl")
@@ -101,3 +142,187 @@ class TrainUpdate(BaseModel):
             logger.warning("Received LateReason dict without a reason code")
             return None
         return str(v)
+
+
+@dataclass
+class Journey:
+    uid: str
+    rid: str
+    location_history: list[TrainLocation]
+
+
+class EventType(Enum):
+    """Enum for train event types.
+
+    PASS: Train is passing through the location without stopping.
+    STOP: Train is stopping at the location.
+    """
+
+    PASS = "PASS"
+    STOP = "STOP"
+
+
+class Watchlist:
+    """Maintains watchlists for user subscriptions."""
+
+    def __init__(
+        self,
+        subscribed_trains: list[str],
+        favourite_stations: Optional[list[str]] = None,
+    ):
+        favourite_stations = favourite_stations or []
+        self.station_watchlist: dict[str, list[TrainUpdate]] = {
+            station: [] for station in favourite_stations
+        }
+        self.train_watchlist: dict[str, Journey] = {
+            uid: Journey(uid=uid, rid="", location_history=[])
+            for uid in subscribed_trains
+        }
+
+    def update_watchlists(self, train_update: TrainUpdate):
+        """Updates the watchlists with the latest train update information."""
+
+        if train_update.uid in self.train_watchlist:  # live train update
+            # Update existing entry or create a new one
+            self.train_watchlist[train_update.uid].rid = train_update.rid
+            self.train_watchlist[train_update.uid].location_history.extend(
+                train_update.location
+            )  # Append new location info
+            return self.train_watchlist[
+                train_update.uid
+            ]  # Read-only Journey object for external use
+
+        stations_intersect = set([loc.tiploc for loc in train_update.location]) & set(
+            self.station_watchlist.keys()
+        )  # station update for a train we're not tracking, but we care about the station
+        if stations_intersect:
+            for loc in stations_intersect:
+                self.station_watchlist[loc].append(train_update)
+                print(
+                    f"Train {train_update.rid} ({train_update.uid}) has an update for station {loc}"
+                )
+
+
+# Pydantic data models for timetable schedule
+@dataclass
+class Schedule(BaseModel):
+    uid: str
+    days_run: str
+    stops: list[TrainLocation] = field(default_factory=list)
+
+
+@dataclass
+class Header(BaseModel):
+    record_identity: str = Field(default="HD")  # always "HD"
+    file_mainframe_identity: str
+    date_of_extract: str  # DDMMYY
+    time_of_extract: str  # HHMM
+    current_file_reference: str
+    last_file_reference: str
+    update_indicator: str
+    version: str
+    user_start_date: str  # DDMMYY
+    user_end_date: str  # DDMMYY
+    spare: str  # reserved for future use
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> Header:
+        if not line.startswith("HD"):
+            raise ValueError("Line does not start with 'HD' header record identifier.")
+        return cls(
+            file_mainframe_identity=line[2:22].strip(),
+            date_of_extract=line[22:28].strip(),
+            time_of_extract=line[28:32].strip(),
+            current_file_reference=line[32:39].strip(),
+            last_file_reference=line[39:46].strip(),
+            update_indicator=line[46:47].strip(),
+            version=line[47:48].strip(),
+            user_start_date=line[48:54].strip(),
+            user_end_date=line[54:60].strip(),
+            spare=line[60:].strip(),
+        )
+
+
+@dataclass
+class TiplocInsert(BaseModel):
+    record_identity: str  # 	2	TI	Always TI.
+    tiploc: str  # 	7	BLTNODR	Timing Point Location Code.
+    capitals_identification: int  # 	2	24	Not used, but may still contain historic data. Was to define capitalisation of TIPLOC.
+    nlc: int  # 	6	853600	National Location Code.
+    nlc_check_char: str  # 	1	D	NLC check character.
+    tps_description: str  # 	26	BOLTON-UPON-DEARNE	Description of location.
+    stanox: int  # 	5	24011	5 character TOPS location code.
+    po_mcp_code: int  # 	4	0	Not used, but may still contain historic data. Was 4 character Post Office Location Code.
+    _3_alpha_code: str  # 	3	BTD	CRS code.
+    nlc_description: str  # 	16	BOLTON ON DEARNE	16 character description used in CAPRI.
+    spare: str  # 	8
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> TiplocInsert:
+        if not line.startswith("TI"):
+            raise ValueError("Line does not start with 'TI' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:9].strip(),
+            capitals_identification=int(line[9:11].strip()),
+            nlc=int(line[11:17].strip()),
+            nlc_check_char=line[17:18].strip(),
+            tps_description=line[18:44].strip(),
+            stanox=int(line[44:49].strip()),
+            po_mcp_code=int(line[49:53].strip()),
+            _3_alpha_code=line[53:56].strip(),
+            nlc_description=line[56:72].strip(),
+            spare=line[72:].strip(),
+        )
+
+
+@dataclass
+class TiplocAmend(BaseModel):
+    record_identity: str  # 	2	TA	Always TA
+    tiploc: str  # 	7	MBRK942	Timing Point Location
+    capitals_identification: int  # 	2	00	Defines capitalisation of TIPLOC
+    nlc: int  # 	6	590970	National Location Code
+    nlc_check_char: str  # 	1	A
+    tps_description: str  # 	26	MILLBROOK SIG E942	Description of location
+    stanox: int  # 	5	86536
+    po_mcp_code: int  # 	4	0
+    _3_alpha_code: str  # 	3
+    nlc_description: str  # 	16
+    new_tiploc: str  # 	7		Only present if TIPLOC change
+    spare: str  # 	1	(empty space)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> TiplocAmend:
+        if not line.startswith("TA"):
+            raise ValueError("Line does not start with 'TA' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:9].strip(),
+            capitals_identification=int(line[9:11].strip()),
+            nlc=int(line[11:17].strip()),
+            nlc_check_char=line[17:18].strip(),
+            tps_description=line[18:44].strip(),
+            stanox=int(line[44:49].strip()),
+            po_mcp_code=int(line[49:53].strip()),
+            _3_alpha_code=line[53:56].strip(),
+            nlc_description=line[56:72].strip(),
+            new_tiploc=line[72:79].strip(),
+            spare=line[79:].strip(),
+        )
+
+
+@dataclass
+class TiplocDelete(BaseModel):
+    record_identity: str  # 	2	TD	Constant value 'TD'
+    tiploc: str  # 	7	MLCHSTR	Timing Point Location code
+    spare: str  # 	71	(empty space)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> TiplocDelete:
+        if not line.startswith("TD"):
+            raise ValueError("Line does not start with 'TD' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:9].strip(),
+            spare=line[9:].strip(),
+        )
