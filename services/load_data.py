@@ -24,14 +24,13 @@ def load_timetable(file_path: str, db: Database) -> None:
 
         for line in f:
             if line.startswith("HD"): # Header record
-                
+               pass 
                 
 
             # BRANCH A: Reference Data (Build the dictionary on the fly)
             if line.startswith("TI"):
                 tiploc_code = line[2:9].strip()
                 full_name = line[18:44].strip()
-                formatted_tiploc_insert = 
                 db.insert_station(tiploc_code, full_name)
                 continue
 

@@ -5,7 +5,13 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "boto3>=1.43.77",
     "confluent-kafka>=2.13.2",
+    "dbt-core>=1.12.2",
+    "dbt-postgres>=1.11.0",
     "dotenv>=0.9.9",
+    "pip>=26.2.1",
     "pydantic>=2.12.5",
+    "python-dotenv>=1.2.2",
+    "tenacity>=9.1.4",
 ]

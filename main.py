@@ -33,8 +33,6 @@ def main():
         user_settings_path = str(os.getenv("USER_SETTINGS_PATH"))
         user_settings = load_user_settings(user_settings_path)
 
-        saved_trains = user_settings.get("saved_trains", [])  # [(TIPLOC, UID), ...]
-
         # Set up Kafka consumer configuration
 
         conf = {

@@ -206,9 +206,58 @@ class Watchlist:
 # Pydantic data models for timetable schedule
 @dataclass
 class Schedule(BaseModel):
+    transaction_type: str
     uid: str
+    start_date: str  # YYMMDD
+    end_date: str  # YYMMDD
     days_run: str
+    bank_holiday_running: str[Optional]
+    train_status: str
+    train_category: str
+    train_identity: str
+    headcode: str[Optional]
+    train_service_code: str
+    portion_id: str[Optional]
+    power_type: str
+    timing_load: str[Optional]
+    speed: str
+    operating_characteristics: str[Optional]
+    seating_class: str[Optional]
+    sleeping_car: str[Optional]
+    reservations: str[Optional]
+    catering_code: str[Optional]
+    service_branding: str[Optional]
+    stp_indicator: str
     stops: list[TrainLocation] = field(default_factory=list)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> Schedule:
+        if not line.startswith("BS"):
+            raise ValueError("Line does not start with 'BS' record identifier.")
+        return cls(
+            transaction_type=line[2:3].strip(),
+            uid=line[3:9].strip(),
+            start_date=line[9:15].strip(),
+            end_date=line[15:21].strip(),
+            days_run=line[21:28].strip(),
+            bank_holiday_running=line[28:29].strip(),
+            train_status=line[29:30].strip(),
+            train_category=line[30:32].strip(),
+            train_identity=line[32:36].strip(),
+            headcode=line[36:40].strip(),
+            train_service_code=line[41:49].strip(),
+            portion_id=line[49:50].strip(),
+            power_type=line[50:53].strip(),
+            timing_load=line[53:57].strip(),
+            speed=line[57:60].strip(),
+            operating_characteristics=line[60:66].strip(),
+            seating_class=line[66:67].strip(),
+            sleeping_car=line[67:68].strip(),
+            reservations=line[68:69].strip(),
+            catering_code=line[69:73].strip(),
+            service_branding=line[73:77].strip(),
+            stp_indicator=line[78:79].strip(),
+        )
 
 
 @dataclass
@@ -223,7 +272,6 @@ class Header(BaseModel):
     version: str
     user_start_date: str  # DDMMYY
     user_end_date: str  # DDMMYY
-    spare: str  # reserved for future use
 
     @classmethod
     def from_cif_line(cls, line: str) -> Header:
@@ -325,4 +373,95 @@ class TiplocDelete(BaseModel):
             record_identity=line[0:2].strip(),
             tiploc=line[2:9].strip(),
             spare=line[9:].strip(),
+        )
+
+
+@dataclass
+class LocationOrigin(BaseModel):
+    record_identity: str  # 	2	LO	Constant value 'LO'
+    tiploc: str  # 	8	MLCHSTR	Timing Point Location code
+    scheduled_departure: str  # 	5	0000	Scheduled departure time (HHMM)
+    public_departure: str  # 	4	0000	Public departure time (HHMM)
+    platform: str  # 	3	00	Platform number
+    line: str  # 	3	00	Line code
+    engineering_allowance: str  # 	2	00	Engineering allowance (minutes)
+    pathing_allowance: str  # 	2	00	Pathing allowance (minutes)
+    activity: str  # 	12
+    performance_allowance: str  # 	2	00	Performance allowance (minutes)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> LocationOrigin:
+        if not line.startswith("LO"):
+            raise ValueError("Line does not start with 'LO' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:10].strip(),
+            scheduled_departure=line[10:15].strip(),
+            public_departure=line[15:19].strip(),
+            platform=line[19:22].strip(),
+            line=line[22:25].strip(),
+            engineering_allowance=line[25:27].strip(),
+            pathing_allowance=line[27:29].strip(),
+            activity=line[29:41].strip(),
+            performance_allowance=line[41:43].strip(),
+        )
+
+
+class LocationIntermediate(BaseModel):
+    record_identity: str  # 	2	LI	Constant value 'LI'
+    tiploc: str  # 	8	MLCHSTR	Timing Point Location code
+    scheduled_arrival: str  # 	5	0000	Scheduled arrival time (HHMM)
+    scheduled_departure: str  # 	5	0000	Scheduled departure time (HHMM)
+    scheduled_pass: str  # 	5	0000	Scheduled pass time (HHMM)
+    public_arrival: str  # 	4	0000	Public arrival time (HHMM)
+    public_departure: str  # 	4	0000	Public departure time (HHMM)
+    platform: str  # 	3	00	Platform number
+    line: str  # 	3	00	Line code
+    path: str  # 	3	00	Path code
+    activity: str  # 	12
+    engineering_allowance: str  # 	2	00	Engineering allowance (minutes)
+    pathing_allowance: str  # 	2	00	Pathing allowance (minutes)
+    performance_allowance: str  # 	2	00	Performance allowance (minutes)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> LocationIntermediate:
+        if not line.startswith("LI"):
+            raise ValueError("Line does not start with 'LI' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:10].strip(),
+            scheduled_arrival=line[10:15].strip(),
+            scheduled_departure=line[15:20].strip(),
+            public_arrival=line[20:24].strip(),
+            public_departure=line[24:29].strip(),
+            platform=line[29:32].strip(),
+            line=line[32:35].strip(),
+            engineering_allowance=line[35:37].strip(),
+            pathing_allowance=line[37:39].strip(),
+            activity=line[39:51].strip(),
+            performance_allowance=line[51:53].strip(),
+        )
+
+
+class LocationTermination(BaseModel):
+    record_identity: str  # 	2	LT	Constant value 'LT'
+    tiploc: str  # 	8	MLCHSTR	Timing Point Location code
+    scheduled_arrival: str  # 	5	0000	Scheduled arrival time (HHMM)
+    public_arrival: str  # 	4	0000	Public arrival time (HHMM)
+    platform: str  # 	3	00	Platform number
+    line: str  # 	3	00	Line code
+    activity: str  # 	12
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> LocationTermination:
+        if not line.startswith("LT"):
+            raise ValueError("Line does not start with 'LT' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:10].strip(),
+            scheduled_arrival=line[10:15].strip(),
+            public_arrival=line[15:19].strip(),
+            platform=line[19:22].strip(),
+            line=line[22:25].strip(),
+            activity=line[25:37].strip(),
         )
