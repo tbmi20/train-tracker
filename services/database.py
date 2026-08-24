@@ -578,6 +578,23 @@ class Database:
             )
         self.conn.commit()
 
+    def get_departure_observations(self, stat_date: str) -> list[dict]:
+        """Every observed stop on `stat_date` (ssd) that had a scheduled
+        departure - the raw material stats modules aggregate into metrics
+        like on_time_pct. One row per (rid, tiploc).
+        """
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT lj.uid, lje.tiploc, lje.planned_dep, lje.est_dep, lje.act_dep
+                FROM live_journeys lj
+                JOIN live_journey_events lje ON lje.rid = lj.rid
+                WHERE lj.ssd = %s AND lje.planned_dep IS NOT NULL
+                """,
+                (stat_date,),
+            )
+            return self._rows_as_dicts(cursor)
+
     # --- Live status reads (for the API service) -------------------------------
 
     def search_stations(self, query: str, limit: int = 10) -> list[dict]:
@@ -659,7 +676,7 @@ class Database:
                 LEFT JOIN LATERAL (
                     SELECT value FROM daily_stats
                     WHERE metric_name = %(reliability_metric)s
-                      AND scope_type = 'station' AND scope_value = d.uid
+                      AND scope_type = 'uid' AND scope_value = d.uid
                     ORDER BY stat_date DESC LIMIT 1
                 ) rel ON TRUE
                 WHERE %(destination_tiploc)s IS NULL OR EXISTS (

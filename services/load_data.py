@@ -1,4 +1,5 @@
 import json
+import logging
 from services.models import (
     UserSettings,
     Schedule,
@@ -9,6 +10,8 @@ from services.models import (
     TiplocInsert,
 )
 from services.database import Database
+
+logger = logging.getLogger(__name__)
 
 
 def load_user_settings(file_path: str) -> UserSettings:
@@ -26,6 +29,28 @@ def load_user_settings(file_path: str) -> UserSettings:
         raise ValueError(
             f"Error decoding JSON from {file_path}. Using default settings."
         )
+
+
+def _write_schedule(schedule: Schedule, db: Database) -> bool:
+    """Upserts a schedule if it's actually complete.
+
+    A well-formed CIF file always closes a BS block with an LT record
+    before the next BS/EOF, but a truncated download (a real risk for an
+    automated nightly S3 pull) can leave the last schedule in the file
+    missing its end_location - upsert_schedule would otherwise crash on
+    that with an unhelpful AttributeError. transaction_type 'D' (delete)
+    schedules never carry locations at all, so they're exempt from this
+    check.
+    """
+    if schedule.transaction_type != "D" and schedule.end_location is None:
+        logger.warning(
+            "Skipping incomplete schedule uid=%s (missing LT record - "
+            "likely a truncated file)",
+            schedule.uid,
+        )
+        return False
+    db.upsert_schedule(schedule)
+    return True
 
 
 def load_timetable(file_path: str, db: Database) -> int:
@@ -53,8 +78,7 @@ def load_timetable(file_path: str, db: Database) -> int:
             # BRANCH B: Start of a new train schedule
             elif line.startswith("BS"):
                 # If a train was already being built, write it before moving to the next
-                if complete_schedule:
-                    db.upsert_schedule(complete_schedule)
+                if complete_schedule and _write_schedule(complete_schedule, db):
                     schedule_count += 1
                 complete_schedule = Schedule.from_cif_line(line)
 
@@ -76,8 +100,7 @@ def load_timetable(file_path: str, db: Database) -> int:
                     )
 
         # Write the final train at the end of the file loop
-        if complete_schedule:
-            db.upsert_schedule(complete_schedule)
+        if complete_schedule and _write_schedule(complete_schedule, db):
             schedule_count += 1
 
     return schedule_count

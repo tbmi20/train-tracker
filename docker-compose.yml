@@ -59,6 +59,7 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - ./services:/opt/airflow/services:ro
+      - ./stats:/opt/airflow/stats:ro
       - airflow_logs:/opt/airflow/logs
     # `standalone` runs the webserver + scheduler in one process and
     # auto-creates an admin user (printed in the container logs on first
