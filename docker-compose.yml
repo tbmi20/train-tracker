@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: train-status-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trainstatus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trainstatus}
+      POSTGRES_DB: ${POSTGRES_DB:-trainstatus}
+    ports:
+      # Host port 5433, not 5432: a native PostgreSQL Windows service on
+      # this machine already owns 5432 (IPv4) and was shadowing Docker's
+      # own port-forward. Container-to-container traffic (e.g. the airflow
+      # service below) still uses 5432 internally - only the host-side
+      # mapping moved.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trainstatus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Airflow metadata DB lives in the same Postgres instance, in a
+  # separate `airflow` database created by docker/postgres-init on
+  # first boot - keeps this to one Postgres container for a hobby setup.
+  airflow:
+    image: apache/airflow:3.0.3-python3.12
+    container_name: train-status-airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-trainstatus}:${POSTGRES_PASSWORD:-trainstatus}@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      PYTHONPATH: /opt/airflow
+      # Dev-only convenience so the DAGs' own imports (boto3, tenacity, etc.)
+      # resolve inside the Airflow image. Fine for a single-user local setup;
+      # switch to a custom Dockerfile with these baked in if this gets flaky.
+      _PIP_ADDITIONAL_REQUIREMENTS: "boto3 tenacity python-dotenv psycopg2-binary pydantic pandas"
+      DB_PATH: postgresql://${POSTGRES_USER:-trainstatus}:${POSTGRES_PASSWORD:-trainstatus}@postgres:5432/${POSTGRES_DB:-trainstatus}
+      TIMETABLE_PATH: /opt/airflow/data/timetable_full
+      DOWNLOAD_DIR: /opt/airflow/downloads
+      EXTRACT_DIR: /opt/airflow/extracted
+      RETAIN_VERSIONS: ${RETAIN_VERSIONS:-2}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+      S3_SCHEDULE_PREFIX: ${S3_SCHEDULE_PREFIX}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./services:/opt/airflow/services:ro
+      - ./data:/opt/airflow/data
+      - airflow_logs:/opt/airflow/logs
+    # `standalone` runs the webserver + scheduler in one process and
+    # auto-creates an admin user (printed in the container logs on first
+    # boot) - the quick-start mode for a single local user, not a
+    # production deployment.
+    command: standalone
+
+volumes:
+  pgdata:
+  airflow_logs:

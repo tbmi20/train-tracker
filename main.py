@@ -33,6 +33,10 @@ def main():
         # Get user specified settings for saved trains and favourite stations
         user_settings_path = str(os.getenv("USER_SETTINGS_PATH"))
         user_settings = load_user_settings(user_settings_path)
+        watchlist = Watchlist(
+            subscribed_trains=[train.uid for train in user_settings.saved_trains],
+            favourite_stations=user_settings.favourite_stations,
+        )
 
         # Set up Kafka consumer configuration
 

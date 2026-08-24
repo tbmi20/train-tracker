@@ -16,6 +16,7 @@ class UserSettings:
     """Represents user settings for saved trains and favourite stations."""
 
     saved_trains: list[SavedTrain] = field(default_factory=list)
+    favourite_stations: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> UserSettings:
@@ -23,6 +24,7 @@ class UserSettings:
             saved_trains=[
                 SavedTrain(**train) for train in data.get("saved_trains", [])
             ],
+            favourite_stations=data.get("favourite_stations", []),
         )
 
     @classmethod
@@ -30,6 +32,7 @@ class UserSettings:
         return json.dumps(
             {
                 "saved_trains": [train.to_dict() for train in settings.saved_trains],
+                "favourite_stations": settings.favourite_stations,
             }
         )
 
@@ -42,9 +45,8 @@ class SavedTrain:
     tiploc: str
     uid: str
 
-    @classmethod
-    def to_dict(cls) -> dict[str, str]:
-        return {"tiploc": cls.tiploc, "uid": cls.uid}
+    def to_dict(self) -> dict[str, str]:
+        return {"tiploc": self.tiploc, "uid": self.uid}
 
 
 # Pydantic models for Kafka messages
@@ -394,7 +396,7 @@ class TiplocInsert(BaseModel):
     tps_description: str  # 	26	BOLTON-UPON-DEARNE	Description of location.
     stanox: int  # 	5	24011	5 character TOPS location code.
     po_mcp_code: int  # 	4	0	Not used, but may still contain historic data. Was 4 character Post Office Location Code.
-    _3_alpha_code: str  # 	3	BTD	CRS code.
+    crs_code: str  # 	3	BTD	CRS code.
     nlc_description: str  # 	16	BOLTON ON DEARNE	16 character description used in CAPRI.
     spare: str  # 	8
 
@@ -411,7 +413,7 @@ class TiplocInsert(BaseModel):
             tps_description=line[18:44].strip(),
             stanox=int(line[44:49].strip()),
             po_mcp_code=int(line[49:53].strip()),
-            _3_alpha_code=line[53:56].strip(),
+            crs_code=line[53:56].strip(),
             nlc_description=line[56:72].strip(),
             spare=line[72:].strip(),
         )
@@ -426,7 +428,7 @@ class TiplocAmend(BaseModel):
     tps_description: str  # 	26	MILLBROOK SIG E942	Description of location
     stanox: int  # 	5	86536
     po_mcp_code: int  # 	4	0
-    _3_alpha_code: str  # 	3
+    crs_code: str  # 	3
     nlc_description: str  # 	16
     new_tiploc: str  # 	7		Only present if TIPLOC change
     spare: str  # 	1	(empty space)
@@ -444,7 +446,7 @@ class TiplocAmend(BaseModel):
             tps_description=line[18:44].strip(),
             stanox=int(line[44:49].strip()),
             po_mcp_code=int(line[49:53].strip()),
-            _3_alpha_code=line[53:56].strip(),
+            crs_code=line[53:56].strip(),
             nlc_description=line[56:72].strip(),
             new_tiploc=line[72:79].strip(),
             spare=line[79:].strip(),

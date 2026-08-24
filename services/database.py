@@ -97,6 +97,102 @@ class Database:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_schedule_locations_tiploc ON schedule_locations (tiploc)"
             )
+
+            # User-managed watchlists (replaces the old UserSettings JSON file).
+            # A station watch is a board: every departure from `tiploc`,
+            # optionally narrowed to services calling at `destination_tiploc`.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watchlist_stations (
+                    id BIGSERIAL PRIMARY KEY,
+                    tiploc VARCHAR(7) NOT NULL REFERENCES tiplocs(tiploc),
+                    destination_tiploc VARCHAR(7) REFERENCES tiplocs(tiploc),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+
+            # A pinned train is a specific recurring service, identified by
+            # its CIF uid plus the station it's watched from (a uid can call
+            # at many locations, so origin_tiploc disambiguates which leg).
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watchlist_trains (
+                    id BIGSERIAL PRIMARY KEY,
+                    uid VARCHAR(6) NOT NULL,
+                    origin_tiploc VARCHAR(7) NOT NULL REFERENCES tiplocs(tiploc),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+
+            # One row per real-time journey instance (Darwin's rid is unique
+            # per service per day, unlike uid which recurs). schedule_id is
+            # nullable - resolving rid/uid/ssd back to a specific schedules
+            # row can fail (schedule not loaded yet, VSTP-only service).
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS live_journeys (
+                    rid VARCHAR(16) PRIMARY KEY,
+                    uid VARCHAR(6) NOT NULL,
+                    ssd VARCHAR(10),
+                    schedule_id BIGINT REFERENCES schedules(id) ON DELETE SET NULL,
+                    cancelled BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+
+            # Observed times per stop, upserted on every relevant Kafka
+            # message. This is the source of truth for both the live-status
+            # API and the nightly reliability stats.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS live_journey_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    rid VARCHAR(16) NOT NULL REFERENCES live_journeys(rid) ON DELETE CASCADE,
+                    tiploc VARCHAR(7) NOT NULL REFERENCES tiplocs(tiploc),
+                    planned_arr VARCHAR(8),
+                    planned_dep VARCHAR(8),
+                    est_arr VARCHAR(8),
+                    est_dep VARCHAR(8),
+                    act_arr VARCHAR(8),
+                    act_dep VARCHAR(8),
+                    platform VARCHAR(3),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (rid, tiploc)
+                )
+                """
+            )
+
+            # Modular stats storage - adding a new metric is "insert rows
+            # with a new metric_name", never a schema change. scope_type is
+            # e.g. 'station' or 'uid'; scope_value is the tiploc/uid itself.
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    id BIGSERIAL PRIMARY KEY,
+                    metric_name VARCHAR(64) NOT NULL,
+                    scope_type VARCHAR(32) NOT NULL,
+                    scope_value VARCHAR(64) NOT NULL,
+                    stat_date DATE NOT NULL,
+                    value NUMERIC NOT NULL,
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (metric_name, scope_type, scope_value, stat_date)
+                )
+                """
+            )
+
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_live_journeys_uid_ssd ON live_journeys (uid, ssd)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_live_journey_events_tiploc ON live_journey_events (tiploc)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_daily_stats_lookup ON daily_stats (metric_name, scope_type, scope_value, stat_date)"
+            )
         self.conn.commit()
 
     def upsert_tiploc(self, tiploc: TiplocInsert) -> None:
@@ -121,7 +217,7 @@ class Database:
                     tiploc.nlc_check_char,
                     tiploc.tps_description,
                     str(tiploc.stanox),
-                    tiploc._3_alpha_code,
+                    tiploc.crs_code,
                     tiploc.nlc_description,
                 ),
             )
@@ -293,5 +389,159 @@ class Database:
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
+            )
+        self.conn.commit()
+
+    @staticmethod
+    def _rows_as_dicts(cursor) -> list[dict]:
+        columns = [col.name for col in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    # --- Watchlist management -------------------------------------------------
+
+    def add_watchlist_station(
+        self, tiploc: str, destination_tiploc: str | None = None
+    ) -> int:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO watchlist_stations (tiploc, destination_tiploc)
+                VALUES (%s, %s)
+                RETURNING id
+                """,
+                (tiploc, destination_tiploc),
+            )
+            watch_id = cursor.fetchone()[0]
+        self.conn.commit()
+        return watch_id
+
+    def remove_watchlist_station(self, watch_id: int) -> None:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM watchlist_stations WHERE id = %s", (watch_id,)
+            )
+        self.conn.commit()
+
+    def list_watchlist_stations(self) -> list[dict]:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, tiploc, destination_tiploc, created_at FROM watchlist_stations"
+            )
+            return self._rows_as_dicts(cursor)
+
+    def add_watchlist_train(self, uid: str, origin_tiploc: str) -> int:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO watchlist_trains (uid, origin_tiploc)
+                VALUES (%s, %s)
+                RETURNING id
+                """,
+                (uid, origin_tiploc),
+            )
+            watch_id = cursor.fetchone()[0]
+        self.conn.commit()
+        return watch_id
+
+    def remove_watchlist_train(self, watch_id: int) -> None:
+        with self.conn.cursor() as cursor:
+            cursor.execute("DELETE FROM watchlist_trains WHERE id = %s", (watch_id,))
+        self.conn.commit()
+
+    def list_watchlist_trains(self) -> list[dict]:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, uid, origin_tiploc, created_at FROM watchlist_trains"
+            )
+            return self._rows_as_dicts(cursor)
+
+    # --- Live journey ingest ---------------------------------------------------
+
+    def upsert_live_journey(
+        self,
+        rid: str,
+        uid: str,
+        ssd: str | None = None,
+        schedule_id: int | None = None,
+        cancelled: bool = False,
+    ) -> None:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO live_journeys (rid, uid, ssd, schedule_id, cancelled, updated_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (rid) DO UPDATE SET
+                    ssd = COALESCE(EXCLUDED.ssd, live_journeys.ssd),
+                    schedule_id = COALESCE(EXCLUDED.schedule_id, live_journeys.schedule_id),
+                    cancelled = EXCLUDED.cancelled,
+                    updated_at = now()
+                """,
+                (rid, uid, ssd, schedule_id, cancelled),
+            )
+        self.conn.commit()
+
+    def upsert_live_journey_event(
+        self,
+        rid: str,
+        tiploc: str,
+        planned_arr: str | None = None,
+        planned_dep: str | None = None,
+        est_arr: str | None = None,
+        est_dep: str | None = None,
+        act_arr: str | None = None,
+        act_dep: str | None = None,
+        platform: str | None = None,
+    ) -> None:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO live_journey_events (
+                    rid, tiploc, planned_arr, planned_dep, est_arr, est_dep,
+                    act_arr, act_dep, platform, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (rid, tiploc) DO UPDATE SET
+                    planned_arr = COALESCE(EXCLUDED.planned_arr, live_journey_events.planned_arr),
+                    planned_dep = COALESCE(EXCLUDED.planned_dep, live_journey_events.planned_dep),
+                    est_arr = COALESCE(EXCLUDED.est_arr, live_journey_events.est_arr),
+                    est_dep = COALESCE(EXCLUDED.est_dep, live_journey_events.est_dep),
+                    act_arr = COALESCE(EXCLUDED.act_arr, live_journey_events.act_arr),
+                    act_dep = COALESCE(EXCLUDED.act_dep, live_journey_events.act_dep),
+                    platform = COALESCE(EXCLUDED.platform, live_journey_events.platform),
+                    updated_at = now()
+                """,
+                (
+                    rid,
+                    tiploc,
+                    planned_arr,
+                    planned_dep,
+                    est_arr,
+                    est_dep,
+                    act_arr,
+                    act_dep,
+                    platform,
+                ),
+            )
+        self.conn.commit()
+
+    # --- Stats -------------------------------------------------------------
+
+    def upsert_daily_stat(
+        self,
+        metric_name: str,
+        scope_type: str,
+        scope_value: str,
+        stat_date: str,
+        value: float,
+    ) -> None:
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO daily_stats (metric_name, scope_type, scope_value, stat_date, value, computed_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (metric_name, scope_type, scope_value, stat_date) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    computed_at = now()
+                """,
+                (metric_name, scope_type, scope_value, stat_date, value),
             )
         self.conn.commit()
