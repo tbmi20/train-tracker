@@ -1,13 +1,20 @@
 from confluent_kafka import Consumer, KafkaException, KafkaError
-import os, sys
+import sys
 import json
-from pathlib import Path
+import time
+from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from logging import getLogger
 
 logger = getLogger(__name__)
-from services.models import TrainUpdate, TrainLocation, Watchlist
+from services.database import Database
+from services.models import TrainUpdate, Watchlist
+
+# How often the ingest loop reloads watchlist_stations/watchlist_trains from
+# Postgres, so watches added/removed via the API get picked up without
+# restarting this process.
+WATCHLIST_REFRESH_SECONDS = 120
 
 
 class MessageParser:
@@ -33,6 +40,11 @@ class MessageParser:
             logger.info("No TS data found in message, skipping.")
             return None
 
+        # ssd (schedule date) is provisionally read off the parent uR record
+        # if TS itself doesn't carry it - unconfirmed against real Darwin
+        # messages, TS's own value (if present) wins.
+        ts_data = {"ssd": update_record.get("ssd"), **ts_data}
+
         try:
             return TrainUpdate(**ts_data)
         except ValidationError as exc:
@@ -41,7 +53,7 @@ class MessageParser:
 
 
 class Observer:
-    """Observer for consuming Kafka messages and processing train information."""
+    """Consumes Kafka messages, filters to the watchlist, and persists matches to Postgres."""
 
     def __init__(
         self,
@@ -49,6 +61,7 @@ class Observer:
         topic: str,
         processor: MessageParser,
         watchlist: Watchlist,
+        database: Database,
     ):
         self.consumer = consumer
         self.topic = topic
@@ -56,6 +69,7 @@ class Observer:
 
         self.processor = processor
         self.watchlist = watchlist
+        self.database = database
 
     def subscribe(self):
         if self.topic:
@@ -63,15 +77,38 @@ class Observer:
         else:
             print("Topic set incorrectly")
 
+    def _persist(self, train_update: TrainUpdate) -> None:
+        ssd = train_update.ssd or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if not self.database.upsert_live_journey(
+            rid=train_update.rid, uid=train_update.uid, ssd=ssd
+        ):
+            return  # already logged by Database; don't attempt the events below
+
+        for location in train_update.location:
+            self.database.upsert_live_journey_event(
+                rid=train_update.rid,
+                tiploc=location.tiploc,
+                planned_arr=location.planned_arr,
+                planned_dep=location.planned_dep,
+                est_arr=location.est_arr,
+                act_arr=location.act_arr,
+                platform=location.platform,
+            )
+
     def consume(self):
         """Consumes messages from Kafka and processes them. Stops when shutdown is called.
 
         Raises:
             KafkaException: If there is an error while consuming messages from Kafka.
         """
+        last_refresh = time.monotonic()
         try:
             self.subscribe()
             while self.running:
+                if time.monotonic() - last_refresh >= WATCHLIST_REFRESH_SECONDS:
+                    self.watchlist.refresh(self.database)
+                    last_refresh = time.monotonic()
+
                 msg = self.consumer.poll(timeout=1.0)
                 if msg is None:
                     continue
@@ -87,11 +124,11 @@ class Observer:
                     elif msg_error:
                         raise KafkaException(msg_error)
                 else:
-                    print(f"Received message: {msg.value()}")
                     train_event = self.processor.parse_message(msg)
                     if train_event is None:
                         continue
-                    self.watchlist.update_watchlists(train_event)
+                    if self.watchlist.matches(train_event):
+                        self._persist(train_event)
         finally:
             # Close down consumer to commit final offsets.
             self.consumer.close()

@@ -44,7 +44,6 @@ services:
       # switch to a custom Dockerfile with these baked in if this gets flaky.
       _PIP_ADDITIONAL_REQUIREMENTS: "boto3 tenacity python-dotenv psycopg2-binary pydantic pandas"
       DB_PATH: postgresql://${POSTGRES_USER:-trainstatus}:${POSTGRES_PASSWORD:-trainstatus}@postgres:5432/${POSTGRES_DB:-trainstatus}
-      TIMETABLE_PATH: /opt/airflow/data/timetable_full
       DOWNLOAD_DIR: /opt/airflow/downloads
       EXTRACT_DIR: /opt/airflow/extracted
       RETAIN_VERSIONS: ${RETAIN_VERSIONS:-2}
@@ -53,12 +52,13 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       S3_BUCKET_NAME: ${S3_BUCKET_NAME}
       S3_SCHEDULE_PREFIX: ${S3_SCHEDULE_PREFIX}
+      S3_WEEKLY_SCHEDULE: ${S3_WEEKLY_SCHEDULE}
+      S3_DAILY_UPDATE: ${S3_DAILY_UPDATE}
     ports:
       - "8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./services:/opt/airflow/services:ro
-      - ./data:/opt/airflow/data
       - airflow_logs:/opt/airflow/logs
     # `standalone` runs the webserver + scheduler in one process and
     # auto-creates an admin user (printed in the container logs on first

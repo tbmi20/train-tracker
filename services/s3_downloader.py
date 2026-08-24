@@ -69,6 +69,15 @@ def list_available_files(s3_client: BaseClient, config: S3Config) -> list[dict]:
     return files
 
 
+def get_last_modified(s3_client: BaseClient, bucket: str, key: str):
+    """Returns the S3 object's LastModified timestamp, for change detection
+    against a specific known key (e.g. the weekly full schedule) without
+    listing the whole bucket prefix.
+    """
+    response = s3_client.head_object(Bucket=bucket, Key=key)
+    return response["LastModified"]
+
+
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=4, max=60))
 def download_file(
     s3_client: BaseClient, bucket: str, key: str, local_path: Path

@@ -1,42 +1,28 @@
 """Models for structuring data from both internal and external sources."""
 
+# Several classes below forward-reference sibling classes defined later in
+# this file (e.g. Schedule -> LocationOrigin). That's only safe without this
+# import on Python 3.14+ (PEP 649 lazy annotations, the host venv's
+# version) - the Airflow container runs 3.12, which evaluates annotations
+# eagerly and raises NameError on those forward references. This defers
+# annotation evaluation to strings on every supported version instead;
+# pydantic resolves them itself when each model is actually used.
+from __future__ import annotations
+
 from pydantic import BaseModel, Field, field_validator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List, Union
+from typing import TYPE_CHECKING, Optional, List, Union
 import json
 import logging
+
+if TYPE_CHECKING:
+    from services.database import Database
 
 logger = logging.getLogger(__name__)
 
 
 # Internal models
-@dataclass
-class UserSettings:
-    """Represents user settings for saved trains and favourite stations."""
-
-    saved_trains: list[SavedTrain] = field(default_factory=list)
-    favourite_stations: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> UserSettings:
-        return cls(
-            saved_trains=[
-                SavedTrain(**train) for train in data.get("saved_trains", [])
-            ],
-            favourite_stations=data.get("favourite_stations", []),
-        )
-
-    @classmethod
-    def to_json(cls, settings: UserSettings) -> str:
-        return json.dumps(
-            {
-                "saved_trains": [train.to_dict() for train in settings.saved_trains],
-                "favourite_stations": settings.favourite_stations,
-            }
-        )
-
-
 @dataclass
 class SavedTrain:
     """Represents a train that a user has saved for tracking."""
@@ -47,6 +33,32 @@ class SavedTrain:
 
     def to_dict(self) -> dict[str, str]:
         return {"tiploc": self.tiploc, "uid": self.uid}
+
+
+@dataclass
+class UserSettings:
+    """Represents user settings for saved trains and favourite stations."""
+
+    saved_trains: list[SavedTrain] = field(default_factory=list)
+    favourite_stations: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "UserSettings":
+        return cls(
+            saved_trains=[
+                SavedTrain(**train) for train in data.get("saved_trains", [])
+            ],
+            favourite_stations=data.get("favourite_stations", []),
+        )
+
+    @classmethod
+    def to_json(cls, settings: "UserSettings") -> str:
+        return json.dumps(
+            {
+                "saved_trains": [train.to_dict() for train in settings.saved_trains],
+                "favourite_stations": settings.favourite_stations,
+            }
+        )
 
 
 # Pydantic models for Kafka messages
@@ -105,6 +117,11 @@ class TrainLateReason(BaseModel):
 class TrainUpdate(BaseModel):
     rid: str
     uid: str
+    # Schedule date (the CIF uid recurs daily, so this plus uid identifies
+    # which day's `schedules` row this rid corresponds to). MessageParser
+    # fills this in from the parent uR record if TS itself doesn't carry it -
+    # unconfirmed against real Darwin messages yet, so treat as provisional.
+    ssd: Optional[str] = Field(alias="ssd", default=None)
     late_reason: Optional[str] = Field(alias="LateReason", default=None)
     # Handling the 'Location is sometimes a list, sometimes a dict' issue
     location: List[TrainLocation] = Field(alias="Location", default_factory=list)
@@ -146,13 +163,6 @@ class TrainUpdate(BaseModel):
         return str(v)
 
 
-@dataclass
-class Journey:
-    uid: str
-    rid: str
-    location_history: list[TrainLocation]
-
-
 class EventType(Enum):
     """Enum for train event types.
 
@@ -165,44 +175,40 @@ class EventType(Enum):
 
 
 class Watchlist:
-    """Maintains watchlists for user subscriptions."""
+    """Fast in-memory membership cache for filtering the Kafka firehose.
+
+    Postgres (watchlist_stations/watchlist_trains) is the source of truth -
+    this only exists to avoid a DB round-trip per Kafka message. Call
+    refresh() periodically so watchlist changes made via the API get picked
+    up without restarting the ingest service.
+    """
 
     def __init__(
         self,
-        subscribed_trains: list[str],
-        favourite_stations: Optional[list[str]] = None,
+        watched_tiplocs: Optional[set[str]] = None,
+        watched_uids: Optional[set[str]] = None,
     ):
-        favourite_stations = favourite_stations or []
-        self.station_watchlist: dict[str, list[TrainUpdate]] = {
-            station: [] for station in favourite_stations
-        }
-        self.train_watchlist: dict[str, Journey] = {
-            uid: Journey(uid=uid, rid="", location_history=[])
-            for uid in subscribed_trains
-        }
+        self.watched_tiplocs: set[str] = watched_tiplocs or set()
+        self.watched_uids: set[str] = watched_uids or set()
 
-    def update_watchlists(self, train_update: TrainUpdate):
-        """Updates the watchlists with the latest train update information."""
+    @classmethod
+    def from_db(cls, db: "Database") -> "Watchlist":
+        watched_tiplocs = {row["tiploc"] for row in db.list_watchlist_stations()}
+        watched_uids = {row["uid"] for row in db.list_watchlist_trains()}
+        return cls(watched_tiplocs=watched_tiplocs, watched_uids=watched_uids)
 
-        if train_update.uid in self.train_watchlist:  # live train update
-            # Update existing entry or create a new one
-            self.train_watchlist[train_update.uid].rid = train_update.rid
-            self.train_watchlist[train_update.uid].location_history.extend(
-                train_update.location
-            )  # Append new location info
-            return self.train_watchlist[
-                train_update.uid
-            ]  # Read-only Journey object for external use
+    def refresh(self, db: "Database") -> None:
+        fresh = Watchlist.from_db(db)
+        self.watched_tiplocs = fresh.watched_tiplocs
+        self.watched_uids = fresh.watched_uids
 
-        stations_intersect = set([loc.tiploc for loc in train_update.location]) & set(
-            self.station_watchlist.keys()
-        )  # station update for a train we're not tracking, but we care about the station
-        if stations_intersect:
-            for loc in stations_intersect:
-                self.station_watchlist[loc].append(train_update)
-                print(
-                    f"Train {train_update.rid} ({train_update.uid}) has an update for station {loc}"
-                )
+    def matches(self, train_update: TrainUpdate) -> bool:
+        """Whether this update concerns a watched train or a watched station."""
+        if train_update.uid in self.watched_uids:
+            return True
+        return any(
+            loc.tiploc in self.watched_tiplocs for loc in train_update.location
+        )
 
 
 # Pydantic data models for timetable schedule

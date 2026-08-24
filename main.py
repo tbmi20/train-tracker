@@ -1,12 +1,12 @@
-from confluent_kafka import Consumer, KafkaException, KafkaError
+from confluent_kafka import Consumer
 from dotenv import load_dotenv
 import os
 from pathlib import Path
 import logging
 
-from services.load_data import load_user_settings, load_timetable
 from services.database import Database
-from services.observation import MessageParser, Observer, Watchlist
+from services.observation import MessageParser, Observer
+from services.models import Watchlist
 
 log_folder = Path("logs")
 log_folder.mkdir(exist_ok=True)
@@ -18,28 +18,23 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    """Always-on live ingest entrypoint.
+
+    Deliberately does *not* load the weekly timetable - that's Airflow's
+    job (nightly_schedule_download), run independently of this process.
+    Runs indefinitely; the watchlist itself is refreshed periodically from
+    Postgres inside Observer.consume() so watches added via the API take
+    effect without restarting this process.
+    """
     try:
         load_dotenv()
 
-        # TODO: Eventually separate this so the rest of the app runs while user settings and timetables are refreshed
-        # Get environment variables for timetable
-        timetable_path = str(os.getenv("TIMETABLE_PATH"))
         database = Database(str(os.getenv("DB_PATH")))
         database.initialise_schema()
 
-        # Load tiploc map and schedule from the weekly timetable into db
-        load_timetable(timetable_path, database)
-
-        # Get user specified settings for saved trains and favourite stations
-        user_settings_path = str(os.getenv("USER_SETTINGS_PATH"))
-        user_settings = load_user_settings(user_settings_path)
-        watchlist = Watchlist(
-            subscribed_trains=[train.uid for train in user_settings.saved_trains],
-            favourite_stations=user_settings.favourite_stations,
-        )
+        watchlist = Watchlist.from_db(database)
 
         # Set up Kafka consumer configuration
-
         conf = {
             "bootstrap.servers": os.getenv("KAFKA_BOOTSTRAP_SERVERS"),
             "security.protocol": os.getenv("KAFKA_SECURITY_PROTOCOL"),
@@ -56,7 +51,7 @@ def main():
         message_parser = MessageParser()
 
         # Create the Observer and start consuming messages
-        observer = Observer(consumer, topic, message_parser, watchlist)
+        observer = Observer(consumer, topic, message_parser, watchlist, database)
         observer.consume()
 
     except KeyboardInterrupt:

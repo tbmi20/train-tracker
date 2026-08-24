@@ -1,6 +1,16 @@
+import logging
+from datetime import datetime
+
 import psycopg2
 
 from services.models import Schedule, TiplocInsert
+
+logger = logging.getLogger(__name__)
+
+# Canonical name for the primary reliability metric surfaced in the API,
+# matching whatever the (not yet built) nightly stats job writes to
+# daily_stats under metric_name='on_time_pct'.
+RELIABILITY_METRIC = "on_time_pct"
 
 
 class Database:
@@ -464,21 +474,34 @@ class Database:
         ssd: str | None = None,
         schedule_id: int | None = None,
         cancelled: bool = False,
-    ) -> None:
-        with self.conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO live_journeys (rid, uid, ssd, schedule_id, cancelled, updated_at)
-                VALUES (%s, %s, %s, %s, %s, now())
-                ON CONFLICT (rid) DO UPDATE SET
-                    ssd = COALESCE(EXCLUDED.ssd, live_journeys.ssd),
-                    schedule_id = COALESCE(EXCLUDED.schedule_id, live_journeys.schedule_id),
-                    cancelled = EXCLUDED.cancelled,
-                    updated_at = now()
-                """,
-                (rid, uid, ssd, schedule_id, cancelled),
-            )
-        self.conn.commit()
+    ) -> bool:
+        """Returns False (and logs) instead of raising on a bad Kafka message.
+
+        This is called from an always-on streaming loop with no client
+        waiting on the result - one malformed/oversized field from the feed
+        should never be allowed to poison the long-lived connection and
+        silently kill ingestion until the process is restarted.
+        """
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO live_journeys (rid, uid, ssd, schedule_id, cancelled, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, now())
+                    ON CONFLICT (rid) DO UPDATE SET
+                        ssd = COALESCE(EXCLUDED.ssd, live_journeys.ssd),
+                        schedule_id = COALESCE(EXCLUDED.schedule_id, live_journeys.schedule_id),
+                        cancelled = EXCLUDED.cancelled,
+                        updated_at = now()
+                    """,
+                    (rid, uid, ssd, schedule_id, cancelled),
+                )
+            self.conn.commit()
+            return True
+        except psycopg2.Error:
+            self.conn.rollback()
+            logger.warning("Failed to upsert live_journey rid=%r uid=%r", rid, uid, exc_info=True)
+            return False
 
     def upsert_live_journey_event(
         self,
@@ -491,37 +514,46 @@ class Database:
         act_arr: str | None = None,
         act_dep: str | None = None,
         platform: str | None = None,
-    ) -> None:
-        with self.conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO live_journey_events (
-                    rid, tiploc, planned_arr, planned_dep, est_arr, est_dep,
-                    act_arr, act_dep, platform, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-                ON CONFLICT (rid, tiploc) DO UPDATE SET
-                    planned_arr = COALESCE(EXCLUDED.planned_arr, live_journey_events.planned_arr),
-                    planned_dep = COALESCE(EXCLUDED.planned_dep, live_journey_events.planned_dep),
-                    est_arr = COALESCE(EXCLUDED.est_arr, live_journey_events.est_arr),
-                    est_dep = COALESCE(EXCLUDED.est_dep, live_journey_events.est_dep),
-                    act_arr = COALESCE(EXCLUDED.act_arr, live_journey_events.act_arr),
-                    act_dep = COALESCE(EXCLUDED.act_dep, live_journey_events.act_dep),
-                    platform = COALESCE(EXCLUDED.platform, live_journey_events.platform),
-                    updated_at = now()
-                """,
-                (
-                    rid,
-                    tiploc,
-                    planned_arr,
-                    planned_dep,
-                    est_arr,
-                    est_dep,
-                    act_arr,
-                    act_dep,
-                    platform,
-                ),
+    ) -> bool:
+        """Returns False (and logs) instead of raising - see upsert_live_journey."""
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO live_journey_events (
+                        rid, tiploc, planned_arr, planned_dep, est_arr, est_dep,
+                        act_arr, act_dep, platform, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (rid, tiploc) DO UPDATE SET
+                        planned_arr = COALESCE(EXCLUDED.planned_arr, live_journey_events.planned_arr),
+                        planned_dep = COALESCE(EXCLUDED.planned_dep, live_journey_events.planned_dep),
+                        est_arr = COALESCE(EXCLUDED.est_arr, live_journey_events.est_arr),
+                        est_dep = COALESCE(EXCLUDED.est_dep, live_journey_events.est_dep),
+                        act_arr = COALESCE(EXCLUDED.act_arr, live_journey_events.act_arr),
+                        act_dep = COALESCE(EXCLUDED.act_dep, live_journey_events.act_dep),
+                        platform = COALESCE(EXCLUDED.platform, live_journey_events.platform),
+                        updated_at = now()
+                    """,
+                    (
+                        rid,
+                        tiploc,
+                        planned_arr,
+                        planned_dep,
+                        est_arr,
+                        est_dep,
+                        act_arr,
+                        act_dep,
+                        platform,
+                    ),
+                )
+            self.conn.commit()
+            return True
+        except psycopg2.Error:
+            self.conn.rollback()
+            logger.warning(
+                "Failed to upsert live_journey_event rid=%r tiploc=%r", rid, tiploc, exc_info=True
             )
-        self.conn.commit()
+            return False
 
     # --- Stats -------------------------------------------------------------
 
@@ -545,3 +577,167 @@ class Database:
                 (metric_name, scope_type, scope_value, stat_date, value),
             )
         self.conn.commit()
+
+    # --- Live status reads (for the API service) -------------------------------
+
+    def search_stations(self, query: str, limit: int = 10) -> list[dict]:
+        """Looks up tiplocs by name/CRS code, for picking a station to watch."""
+        pattern = f"%{query}%"
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT tiploc, crs_code, tps_description
+                FROM tiplocs
+                WHERE tps_description ILIKE %s OR crs_code ILIKE %s OR tiploc ILIKE %s
+                ORDER BY tps_description
+                LIMIT %s
+                """,
+                (pattern, pattern, pattern, limit),
+            )
+            return self._rows_as_dicts(cursor)
+
+    def get_upcoming_departures(
+        self,
+        tiploc: str,
+        destination_tiploc: str | None = None,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Next scheduled departures from `tiploc` today, overlaid with live data.
+
+        Picks the CIF schedule row for each uid that's actually in effect
+        today (date range + day-of-week match, STP overlay/cancellation
+        takes precedence over the permanent schedule per CIF rules), then
+        joins in live_journeys/live_journey_events (matched on uid+ssd) and
+        the most recent daily_stats reliability figure for the station, if
+        any exist yet.
+        """
+        now = datetime.now()
+        today_yymmdd = now.strftime("%y%m%d")
+        today_iso = now.strftime("%Y-%m-%d")
+        weekday_position = now.isoweekday()  # Monday=1 .. Sunday=7, matches CIF days_run order
+        now_hhmm = now.strftime("%H%M")
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH day_schedules AS (
+                    SELECT DISTINCT ON (s.uid)
+                        s.id, s.uid, s.stp_indicator
+                    FROM schedules s
+                    WHERE s.start_date <= %(today_yymmdd)s
+                      AND s.end_date >= %(today_yymmdd)s
+                      AND substring(s.days_run FROM %(weekday)s FOR 1) = '1'
+                    ORDER BY s.uid,
+                        CASE s.stp_indicator
+                            WHEN 'C' THEN 0
+                            WHEN 'O' THEN 1
+                            WHEN 'N' THEN 2
+                            WHEN 'P' THEN 3
+                            ELSE 4
+                        END
+                ),
+                departures AS (
+                    SELECT
+                        ds.id AS schedule_id, ds.uid, sl.stop_sequence,
+                        substring(sl.scheduled_departure FROM 1 FOR 4) AS scheduled_departure,
+                        sl.platform AS scheduled_platform
+                    FROM day_schedules ds
+                    JOIN schedule_locations sl ON sl.schedule_id = ds.id
+                    WHERE ds.stp_indicator <> 'C'
+                      AND sl.tiploc = %(tiploc)s
+                      AND sl.scheduled_departure IS NOT NULL
+                      AND substring(sl.scheduled_departure FROM 1 FOR 4) >= %(now_hhmm)s
+                )
+                SELECT
+                    d.uid, d.scheduled_departure, d.scheduled_platform,
+                    lj.rid, lj.cancelled,
+                    lje.est_dep, lje.act_dep, lje.platform AS live_platform,
+                    rel.value AS reliability_pct
+                FROM departures d
+                LEFT JOIN live_journeys lj ON lj.uid = d.uid AND lj.ssd = %(today_iso)s
+                LEFT JOIN live_journey_events lje ON lje.rid = lj.rid AND lje.tiploc = %(tiploc)s
+                LEFT JOIN LATERAL (
+                    SELECT value FROM daily_stats
+                    WHERE metric_name = %(reliability_metric)s
+                      AND scope_type = 'station' AND scope_value = d.uid
+                    ORDER BY stat_date DESC LIMIT 1
+                ) rel ON TRUE
+                WHERE %(destination_tiploc)s IS NULL OR EXISTS (
+                    SELECT 1 FROM schedule_locations sl2
+                    WHERE sl2.schedule_id = d.schedule_id
+                      AND sl2.stop_sequence > d.stop_sequence
+                      AND sl2.tiploc = %(destination_tiploc)s
+                )
+                ORDER BY d.scheduled_departure
+                LIMIT %(limit)s
+                """,
+                {
+                    "today_yymmdd": today_yymmdd,
+                    "today_iso": today_iso,
+                    "weekday": weekday_position,
+                    "now_hhmm": now_hhmm,
+                    "tiploc": tiploc,
+                    "destination_tiploc": destination_tiploc,
+                    "reliability_metric": RELIABILITY_METRIC,
+                    "limit": limit,
+                },
+            )
+            return self._rows_as_dicts(cursor)
+
+    def get_train_status(self, uid: str, origin_tiploc: str) -> dict | None:
+        """Today's status for a single pinned train, or None if it doesn't run today."""
+        now = datetime.now()
+        today_yymmdd = now.strftime("%y%m%d")
+        today_iso = now.strftime("%Y-%m-%d")
+        weekday_position = now.isoweekday()
+
+        with self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH day_schedule AS (
+                    SELECT s.id, s.uid, s.stp_indicator
+                    FROM schedules s
+                    WHERE s.uid = %(uid)s
+                      AND s.start_date <= %(today_yymmdd)s
+                      AND s.end_date >= %(today_yymmdd)s
+                      AND substring(s.days_run FROM %(weekday)s FOR 1) = '1'
+                    ORDER BY
+                        CASE s.stp_indicator
+                            WHEN 'C' THEN 0
+                            WHEN 'O' THEN 1
+                            WHEN 'N' THEN 2
+                            WHEN 'P' THEN 3
+                            ELSE 4
+                        END
+                    LIMIT 1
+                )
+                SELECT
+                    ds.uid, ds.stp_indicator,
+                    substring(sl.scheduled_departure FROM 1 FOR 4) AS scheduled_departure,
+                    sl.platform AS scheduled_platform,
+                    lj.rid, lj.cancelled,
+                    lje.est_dep, lje.act_dep, lje.platform AS live_platform,
+                    rel.value AS reliability_pct
+                FROM day_schedule ds
+                JOIN schedule_locations sl ON sl.schedule_id = ds.id AND sl.tiploc = %(origin_tiploc)s
+                LEFT JOIN live_journeys lj ON lj.uid = ds.uid AND lj.ssd = %(today_iso)s
+                LEFT JOIN live_journey_events lje ON lje.rid = lj.rid AND lje.tiploc = %(origin_tiploc)s
+                LEFT JOIN LATERAL (
+                    SELECT value FROM daily_stats
+                    WHERE metric_name = %(reliability_metric)s
+                      AND scope_type = 'uid' AND scope_value = ds.uid
+                    ORDER BY stat_date DESC LIMIT 1
+                ) rel ON TRUE
+                LIMIT 1
+                """,
+                {
+                    "uid": uid,
+                    "origin_tiploc": origin_tiploc,
+                    "today_yymmdd": today_yymmdd,
+                    "today_iso": today_iso,
+                    "weekday": weekday_position,
+                    "reliability_metric": RELIABILITY_METRIC,
+                },
+            )
+            rows = self._rows_as_dicts(cursor)
+            return rows[0] if rows else None
