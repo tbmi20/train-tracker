@@ -289,7 +289,11 @@ class LocationOrigin(BaseModel):
             raise ValueError("Line does not start with 'LO' record identifier.")
         return cls(
             record_identity=line[0:2].strip(),
-            tiploc=line[2:10].strip(),
+            # 8-char field: 7-char tiploc + 1-char "repeat visit" suffix
+            # (e.g. 'SWANSLE2' when a schedule calls at the same tiploc
+            # twice) - drop the suffix, stop_sequence already disambiguates
+            # repeat visits in schedule_locations.
+            tiploc=line[2:10][:7].strip(),
             scheduled_departure=line[10:15].strip(),
             public_departure=line[15:19].strip(),
             platform=line[19:22].strip(),
@@ -323,7 +327,11 @@ class LocationIntermediate(BaseModel):
             raise ValueError("Line does not start with 'LI' record identifier.")
         return cls(
             record_identity=line[0:2].strip(),
-            tiploc=line[2:10].strip(),
+            # 8-char field: 7-char tiploc + 1-char "repeat visit" suffix
+            # (e.g. 'SWANSLE2' when a schedule calls at the same tiploc
+            # twice) - drop the suffix, stop_sequence already disambiguates
+            # repeat visits in schedule_locations.
+            tiploc=line[2:10][:7].strip(),
             scheduled_arrival=line[10:15].strip(),
             scheduled_departure=line[15:20].strip(),
             scheduled_pass=line[20:25].strip(),
@@ -354,7 +362,11 @@ class LocationTermination(BaseModel):
             raise ValueError("Line does not start with 'LT' record identifier.")
         return cls(
             record_identity=line[0:2].strip(),
-            tiploc=line[2:10].strip(),
+            # 8-char field: 7-char tiploc + 1-char "repeat visit" suffix
+            # (e.g. 'SWANSLE2' when a schedule calls at the same tiploc
+            # twice) - drop the suffix, stop_sequence already disambiguates
+            # repeat visits in schedule_locations.
+            tiploc=line[2:10][:7].strip(),
             scheduled_arrival=line[10:15].strip(),
             public_arrival=line[15:19].strip(),
             platform=line[19:22].strip(),
