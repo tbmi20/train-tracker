@@ -24,10 +24,11 @@ def main():
         # TODO: Eventually separate this so the rest of the app runs while user settings and timetables are refreshed
         # Get environment variables for timetable
         timetable_path = str(os.getenv("TIMETABLE_PATH"))
-        database_path = str(os.getenv("DB_PATH"))
+        database = Database(str(os.getenv("DB_PATH")))
+        database.initialise_schema()
 
         # Load tiploc map and schedule from the weekly timetable into db
-        load_timetable(timetable_path, Database(database_path))
+        load_timetable(timetable_path, database)
 
         # Get user specified settings for saved trains and favourite stations
         user_settings_path = str(os.getenv("USER_SETTINGS_PATH"))

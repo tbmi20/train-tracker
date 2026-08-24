@@ -1,5 +1,13 @@
 import json
-from services.models import UserSettings, Schedule
+from services.models import (
+    UserSettings,
+    Schedule,
+    Header,
+    LocationOrigin,
+    LocationIntermediate,
+    LocationTermination,
+    TiplocInsert,
+)
 from services.database import Database
 
 
@@ -9,67 +17,67 @@ def load_user_settings(file_path: str) -> UserSettings:
         with open(file_path, "r") as f:
             settings = json.load(f)
         return UserSettings.from_dict(settings)
-        
+
     except FileNotFoundError:
-        raise FileNotFoundError(f"Settings file not found at {file_path}. Using default settings.")
+        raise FileNotFoundError(
+            f"Settings file not found at {file_path}. Using default settings."
+        )
     except json.JSONDecodeError:
-        raise ValueError(f"Error decoding JSON from {file_path}. Using default settings.")
+        raise ValueError(
+            f"Error decoding JSON from {file_path}. Using default settings."
+        )
 
 
-def load_timetable(file_path: str, db: Database) -> None:
+def load_timetable(file_path: str, db: Database) -> int:
+    """Parses a CIF timetable file, writing tiplocs and schedules to the database.
 
+    Returns the number of schedules written.
+    """
+    schedule_count = 0
     complete_schedule = None
 
     with open(file_path, "r") as f:
 
         for line in f:
-            if line.startswith("HD"): # Header record
-               pass 
-                
+            if line.startswith("HD"):  # Header record
+                header = Header.from_cif_line(line)
 
-            # BRANCH A: Reference Data (Build the dictionary on the fly)
-            if line.startswith("TI"):
+            # BRANCH A: Reference Data (tiploc lookup table)
+            elif line.startswith("TI"):
+                db.upsert_tiploc(TiplocInsert.from_cif_line(line))
+
+            elif line.startswith("TD"):
                 tiploc_code = line[2:9].strip()
-                full_name = line[18:44].strip()
-                db.insert_station(tiploc_code, full_name)
-                continue
+                db.delete_tiploc(tiploc_code)
 
             # BRANCH B: Start of a new train schedule
             elif line.startswith("BS"):
-                # If a train was already being built, index it before moving to the next
+                # If a train was already being built, write it before moving to the next
                 if complete_schedule:
-                    db.insert_schedule(complete_schedule, conn=conn)
-
-                uid = line[3:9].strip()
-                days_run = line[21:28].strip()
-                complete_schedule = Schedule(uid=uid, days_run=days_run)
+                    db.upsert_schedule(complete_schedule)
+                    schedule_count += 1
+                complete_schedule = Schedule.from_cif_line(line)
 
             # BRANCH C: Route Detail lines for the active train
-            elif (
-                line.startswith(("LO", "LI", "LT"))
-                and complete_schedule is not None
-            ):
+            elif line.startswith(("LO", "LT", "LI")) and complete_schedule:
                 rec_type = line[0:2]
-                tiploc = line[2:9].strip()
 
                 # Extract the time based on line type
-                time_str = None
                 if rec_type == "LO":
-                    time_str = line[15:19].strip()
-                elif rec_type == "LT":
-                    time_str = line[11:15].strip()
+                    complete_schedule.start_location = LocationOrigin.from_cif_line(
+                        line
+                    )
                 elif rec_type == "LI":
-                    time_str = line[53:57].strip()
+                    location = LocationIntermediate.from_cif_line(line)
+                    complete_schedule.stops.append(location)
+                elif rec_type == "LT":
+                    complete_schedule.end_location = LocationTermination.from_cif_line(
+                        line
+                    )
 
-                # Create location and attach the station name if we've already parsed its TI record
-                location = TrainLocation(
-                    tpl=tiploc,
-                )
-                complete_schedule.stops.append(location)
-
-        # Clean up the final train at the end of the file loop
+        # Write the final train at the end of the file loop
         if complete_schedule:
-            db.insert_schedule(complete_schedule, conn=conn)
+            db.upsert_schedule(complete_schedule)
+            schedule_count += 1
 
-        db.mark_timetable_loaded(conn)
-        conn.commit()
+    return schedule_count

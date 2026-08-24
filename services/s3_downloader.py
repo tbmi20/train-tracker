@@ -1,12 +1,5 @@
 """
 S3 download + extraction helpers for the nightly CIF schedule pull.
-
-Design note: this module only knows how to talk to S3 and the local
-filesystem. It deliberately does NOT know about Postgres, "what counts as
-new", or retention policy beyond a simple version count — those are
-pipeline decisions that belong in the DAG / manifest table, not here.
-Keeping this module dumb means you can unit test it without a database
-or Airflow running.
 """
 
 import gzip
@@ -70,12 +63,16 @@ def list_available_files(s3_client: BaseClient, config: S3Config) -> list[dict]:
                     "size": obj["Size"],
                 }
             )
-    logger.info("Found %d files under s3://%s/%s", len(files), config.bucket, config.prefix)
+    logger.info(
+        "Found %d files under s3://%s/%s", len(files), config.bucket, config.prefix
+    )
     return files
 
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=4, max=60))
-def download_file(s3_client: BaseClient, bucket: str, key: str, local_path: Path) -> Path:
+def download_file(
+    s3_client: BaseClient, bucket: str, key: str, local_path: Path
+) -> Path:
     """
     Retries with exponential backoff (4s, 8s, 16s, 32s, 60s — 5 attempts).
     This is what gives you the "retry until 5am" behaviour when combined
@@ -116,13 +113,17 @@ def unzip_file(archive_path: Path, extract_dir: Path) -> list[Path]:
     return extracted
 
 
-def cleanup_old_versions(extract_dir: Path, keep: int, pattern: str = "*") -> list[Path]:
+def cleanup_old_versions(
+    extract_dir: Path, keep: int, pattern: str = "*"
+) -> list[Path]:
     """
     Keeps the `keep` most recently modified files matching `pattern`
     in extract_dir and deletes the rest. This is what frees disk space
     before the ELT pipeline runs, per your CV bullet.
     """
-    files = sorted(extract_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(
+        extract_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     to_delete = files[keep:]
     for f in to_delete:
         logger.info("Deleting old version: %s", f)

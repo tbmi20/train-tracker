@@ -204,31 +204,34 @@ class Watchlist:
 
 
 # Pydantic data models for timetable schedule
-@dataclass
 class Schedule(BaseModel):
     transaction_type: str
     uid: str
     start_date: str  # YYMMDD
     end_date: str  # YYMMDD
     days_run: str
-    bank_holiday_running: str[Optional]
+    bank_holiday_running: Optional[str]
     train_status: str
     train_category: str
     train_identity: str
-    headcode: str[Optional]
+    headcode: Optional[str]
     train_service_code: str
-    portion_id: str[Optional]
+    portion_id: Optional[str]
     power_type: str
-    timing_load: str[Optional]
+    timing_load: Optional[str]
     speed: str
-    operating_characteristics: str[Optional]
-    seating_class: str[Optional]
-    sleeping_car: str[Optional]
-    reservations: str[Optional]
-    catering_code: str[Optional]
-    service_branding: str[Optional]
+    operating_characteristics: Optional[str]
+    seating_class: Optional[str]
+    sleeping_car: Optional[str]
+    reservations: Optional[str]
+    catering_code: Optional[str]
+    service_branding: Optional[str]
     stp_indicator: str
-    stops: list[TrainLocation] = field(default_factory=list)
+
+    # Populated incrementally as LO/LI/LT lines following the BS record are parsed
+    start_location: Optional[LocationOrigin] = None
+    stops: list[LocationIntermediate] = field(default_factory=list)
+    end_location: Optional[LocationTermination] = None
 
     @classmethod
     def from_cif_line(cls, line: str) -> Schedule:
@@ -260,123 +263,6 @@ class Schedule(BaseModel):
         )
 
 
-@dataclass
-class Header(BaseModel):
-    record_identity: str = Field(default="HD")  # always "HD"
-    file_mainframe_identity: str
-    date_of_extract: str  # DDMMYY
-    time_of_extract: str  # HHMM
-    current_file_reference: str
-    last_file_reference: str
-    update_indicator: str
-    version: str
-    user_start_date: str  # DDMMYY
-    user_end_date: str  # DDMMYY
-
-    @classmethod
-    def from_cif_line(cls, line: str) -> Header:
-        if not line.startswith("HD"):
-            raise ValueError("Line does not start with 'HD' header record identifier.")
-        return cls(
-            file_mainframe_identity=line[2:22].strip(),
-            date_of_extract=line[22:28].strip(),
-            time_of_extract=line[28:32].strip(),
-            current_file_reference=line[32:39].strip(),
-            last_file_reference=line[39:46].strip(),
-            update_indicator=line[46:47].strip(),
-            version=line[47:48].strip(),
-            user_start_date=line[48:54].strip(),
-            user_end_date=line[54:60].strip(),
-            spare=line[60:].strip(),
-        )
-
-
-@dataclass
-class TiplocInsert(BaseModel):
-    record_identity: str  # 	2	TI	Always TI.
-    tiploc: str  # 	7	BLTNODR	Timing Point Location Code.
-    capitals_identification: int  # 	2	24	Not used, but may still contain historic data. Was to define capitalisation of TIPLOC.
-    nlc: int  # 	6	853600	National Location Code.
-    nlc_check_char: str  # 	1	D	NLC check character.
-    tps_description: str  # 	26	BOLTON-UPON-DEARNE	Description of location.
-    stanox: int  # 	5	24011	5 character TOPS location code.
-    po_mcp_code: int  # 	4	0	Not used, but may still contain historic data. Was 4 character Post Office Location Code.
-    _3_alpha_code: str  # 	3	BTD	CRS code.
-    nlc_description: str  # 	16	BOLTON ON DEARNE	16 character description used in CAPRI.
-    spare: str  # 	8
-
-    @classmethod
-    def from_cif_line(cls, line: str) -> TiplocInsert:
-        if not line.startswith("TI"):
-            raise ValueError("Line does not start with 'TI' record identifier.")
-        return cls(
-            record_identity=line[0:2].strip(),
-            tiploc=line[2:9].strip(),
-            capitals_identification=int(line[9:11].strip()),
-            nlc=int(line[11:17].strip()),
-            nlc_check_char=line[17:18].strip(),
-            tps_description=line[18:44].strip(),
-            stanox=int(line[44:49].strip()),
-            po_mcp_code=int(line[49:53].strip()),
-            _3_alpha_code=line[53:56].strip(),
-            nlc_description=line[56:72].strip(),
-            spare=line[72:].strip(),
-        )
-
-
-@dataclass
-class TiplocAmend(BaseModel):
-    record_identity: str  # 	2	TA	Always TA
-    tiploc: str  # 	7	MBRK942	Timing Point Location
-    capitals_identification: int  # 	2	00	Defines capitalisation of TIPLOC
-    nlc: int  # 	6	590970	National Location Code
-    nlc_check_char: str  # 	1	A
-    tps_description: str  # 	26	MILLBROOK SIG E942	Description of location
-    stanox: int  # 	5	86536
-    po_mcp_code: int  # 	4	0
-    _3_alpha_code: str  # 	3
-    nlc_description: str  # 	16
-    new_tiploc: str  # 	7		Only present if TIPLOC change
-    spare: str  # 	1	(empty space)
-
-    @classmethod
-    def from_cif_line(cls, line: str) -> TiplocAmend:
-        if not line.startswith("TA"):
-            raise ValueError("Line does not start with 'TA' record identifier.")
-        return cls(
-            record_identity=line[0:2].strip(),
-            tiploc=line[2:9].strip(),
-            capitals_identification=int(line[9:11].strip()),
-            nlc=int(line[11:17].strip()),
-            nlc_check_char=line[17:18].strip(),
-            tps_description=line[18:44].strip(),
-            stanox=int(line[44:49].strip()),
-            po_mcp_code=int(line[49:53].strip()),
-            _3_alpha_code=line[53:56].strip(),
-            nlc_description=line[56:72].strip(),
-            new_tiploc=line[72:79].strip(),
-            spare=line[79:].strip(),
-        )
-
-
-@dataclass
-class TiplocDelete(BaseModel):
-    record_identity: str  # 	2	TD	Constant value 'TD'
-    tiploc: str  # 	7	MLCHSTR	Timing Point Location code
-    spare: str  # 	71	(empty space)
-
-    @classmethod
-    def from_cif_line(cls, line: str) -> TiplocDelete:
-        if not line.startswith("TD"):
-            raise ValueError("Line does not start with 'TD' record identifier.")
-        return cls(
-            record_identity=line[0:2].strip(),
-            tiploc=line[2:9].strip(),
-            spare=line[9:].strip(),
-        )
-
-
-@dataclass
 class LocationOrigin(BaseModel):
     record_identity: str  # 	2	LO	Constant value 'LO'
     tiploc: str  # 	8	MLCHSTR	Timing Point Location code
@@ -432,14 +318,16 @@ class LocationIntermediate(BaseModel):
             tiploc=line[2:10].strip(),
             scheduled_arrival=line[10:15].strip(),
             scheduled_departure=line[15:20].strip(),
-            public_arrival=line[20:24].strip(),
-            public_departure=line[24:29].strip(),
-            platform=line[29:32].strip(),
-            line=line[32:35].strip(),
-            engineering_allowance=line[35:37].strip(),
-            pathing_allowance=line[37:39].strip(),
-            activity=line[39:51].strip(),
-            performance_allowance=line[51:53].strip(),
+            scheduled_pass=line[20:25].strip(),
+            public_arrival=line[25:29].strip(),
+            public_departure=line[29:33].strip(),
+            platform=line[33:36].strip(),
+            line=line[36:39].strip(),
+            path=line[39:42].strip(),
+            activity=line[42:54].strip(),
+            engineering_allowance=line[54:56].strip(),
+            pathing_allowance=line[56:58].strip(),
+            performance_allowance=line[58:60].strip(),
         )
 
 
@@ -464,4 +352,116 @@ class LocationTermination(BaseModel):
             platform=line[19:22].strip(),
             line=line[22:25].strip(),
             activity=line[25:37].strip(),
+        )
+
+
+class Header(BaseModel):
+    record_identity: str = Field(default="HD")  # always "HD"
+    file_mainframe_identity: str
+    date_of_extract: str  # DDMMYY
+    time_of_extract: str  # HHMM
+    current_file_reference: str
+    last_file_reference: str
+    update_indicator: str
+    version: str
+    user_start_date: str  # DDMMYY
+    user_end_date: str  # DDMMYY
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> Header:
+        if not line.startswith("HD"):
+            raise ValueError("Line does not start with 'HD' header record identifier.")
+        return cls(
+            file_mainframe_identity=line[2:22].strip(),
+            date_of_extract=line[22:28].strip(),
+            time_of_extract=line[28:32].strip(),
+            current_file_reference=line[32:39].strip(),
+            last_file_reference=line[39:46].strip(),
+            update_indicator=line[46:47].strip(),
+            version=line[47:48].strip(),
+            user_start_date=line[48:54].strip(),
+            user_end_date=line[54:60].strip(),
+            spare=line[60:].strip(),
+        )
+
+
+class TiplocInsert(BaseModel):
+    record_identity: str  # 	2	TI	Always TI.
+    tiploc: str  # 	7	BLTNODR	Timing Point Location Code.
+    capitals_identification: int  # 	2	24	Not used, but may still contain historic data. Was to define capitalisation of TIPLOC.
+    nlc: int  # 	6	853600	National Location Code.
+    nlc_check_char: str  # 	1	D	NLC check character.
+    tps_description: str  # 	26	BOLTON-UPON-DEARNE	Description of location.
+    stanox: int  # 	5	24011	5 character TOPS location code.
+    po_mcp_code: int  # 	4	0	Not used, but may still contain historic data. Was 4 character Post Office Location Code.
+    _3_alpha_code: str  # 	3	BTD	CRS code.
+    nlc_description: str  # 	16	BOLTON ON DEARNE	16 character description used in CAPRI.
+    spare: str  # 	8
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> TiplocInsert:
+        if not line.startswith("TI"):
+            raise ValueError("Line does not start with 'TI' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:9].strip(),
+            capitals_identification=int(line[9:11].strip()),
+            nlc=int(line[11:17].strip()),
+            nlc_check_char=line[17:18].strip(),
+            tps_description=line[18:44].strip(),
+            stanox=int(line[44:49].strip()),
+            po_mcp_code=int(line[49:53].strip()),
+            _3_alpha_code=line[53:56].strip(),
+            nlc_description=line[56:72].strip(),
+            spare=line[72:].strip(),
+        )
+
+
+class TiplocAmend(BaseModel):
+    record_identity: str  # 	2	TA	Always TA
+    tiploc: str  # 	7	MBRK942	Timing Point Location
+    capitals_identification: int  # 	2	00	Defines capitalisation of TIPLOC
+    nlc: int  # 	6	590970	National Location Code
+    nlc_check_char: str  # 	1	A
+    tps_description: str  # 	26	MILLBROOK SIG E942	Description of location
+    stanox: int  # 	5	86536
+    po_mcp_code: int  # 	4	0
+    _3_alpha_code: str  # 	3
+    nlc_description: str  # 	16
+    new_tiploc: str  # 	7		Only present if TIPLOC change
+    spare: str  # 	1	(empty space)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> TiplocAmend:
+        if not line.startswith("TA"):
+            raise ValueError("Line does not start with 'TA' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:9].strip(),
+            capitals_identification=int(line[9:11].strip()),
+            nlc=int(line[11:17].strip()),
+            nlc_check_char=line[17:18].strip(),
+            tps_description=line[18:44].strip(),
+            stanox=int(line[44:49].strip()),
+            po_mcp_code=int(line[49:53].strip()),
+            _3_alpha_code=line[53:56].strip(),
+            nlc_description=line[56:72].strip(),
+            new_tiploc=line[72:79].strip(),
+            spare=line[79:].strip(),
+        )
+
+
+class TiplocDelete(BaseModel):
+    record_identity: str  # 	2	TD	Constant value 'TD'
+    tiploc: str  # 	7	MLCHSTR	Timing Point Location code
+    spare: str  # 	71	(empty space)
+
+    @classmethod
+    def from_cif_line(cls, line: str) -> TiplocDelete:
+        if not line.startswith("TD"):
+            raise ValueError("Line does not start with 'TD' record identifier.")
+        return cls(
+            record_identity=line[0:2].strip(),
+            tiploc=line[2:9].strip(),
+            spare=line[9:].strip(),
         )
