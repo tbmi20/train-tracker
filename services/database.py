@@ -25,8 +25,7 @@ class Database:
     def initialise_schema(self) -> None:
         with self.conn.cursor() as cursor:
             # Reference data from TI records - locations schedules can point to
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tiplocs (
                     tiploc VARCHAR(7) PRIMARY KEY,
                     nlc VARCHAR(6),
@@ -36,13 +35,11 @@ class Database:
                     crs_code VARCHAR(3),
                     nlc_description VARCHAR(16)
                 )
-                """
-            )
+                """)
 
             # One row per BS record. Natural key per CIF docs is (uid, start_date,
             # stp_indicator) - uid alone isn't unique because STP overlays reuse it.
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schedules (
                     id BIGSERIAL PRIMARY KEY,
                     uid VARCHAR(6) NOT NULL,
@@ -69,15 +66,13 @@ class Database:
                     service_branding VARCHAR(4),
                     UNIQUE (uid, start_date, stp_indicator)
                 )
-                """
-            )
+                """)
 
             # One row per LO/LI/LT record, linked back to its schedule. stop_sequence
             # preserves journey order; location_type distinguishes which CIF record
             # produced the row, since LO/LI/LT each populate a different subset of
             # the arrival/departure/pass columns.
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schedule_locations (
                     id BIGSERIAL PRIMARY KEY,
                     schedule_id BIGINT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
@@ -98,8 +93,7 @@ class Database:
                     performance_allowance VARCHAR(2),
                     UNIQUE (schedule_id, stop_sequence)
                 )
-                """
-            )
+                """)
 
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_schedules_uid ON schedules (uid)"
@@ -111,37 +105,32 @@ class Database:
             # User-managed watchlists (replaces the old UserSettings JSON file).
             # A station watch is a board: every departure from `tiploc`,
             # optionally narrowed to services calling at `destination_tiploc`.
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS watchlist_stations (
                     id BIGSERIAL PRIMARY KEY,
                     tiploc VARCHAR(7) NOT NULL REFERENCES tiplocs(tiploc),
                     destination_tiploc VARCHAR(7) REFERENCES tiplocs(tiploc),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
-                """
-            )
+                """)
 
             # A pinned train is a specific recurring service, identified by
             # its CIF uid plus the station it's watched from (a uid can call
             # at many locations, so origin_tiploc disambiguates which leg).
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS watchlist_trains (
                     id BIGSERIAL PRIMARY KEY,
                     uid VARCHAR(6) NOT NULL,
                     origin_tiploc VARCHAR(7) NOT NULL REFERENCES tiplocs(tiploc),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
-                """
-            )
+                """)
 
             # One row per real-time journey instance (Darwin's rid is unique
             # per service per day, unlike uid which recurs). schedule_id is
             # nullable - resolving rid/uid/ssd back to a specific schedules
             # row can fail (schedule not loaded yet, VSTP-only service).
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS live_journeys (
                     rid VARCHAR(16) PRIMARY KEY,
                     uid VARCHAR(6) NOT NULL,
@@ -151,14 +140,12 @@ class Database:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
-                """
-            )
+                """)
 
             # Observed times per stop, upserted on every relevant Kafka
             # message. This is the source of truth for both the live-status
             # API and the nightly reliability stats.
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS live_journey_events (
                     id BIGSERIAL PRIMARY KEY,
                     rid VARCHAR(16) NOT NULL REFERENCES live_journeys(rid) ON DELETE CASCADE,
@@ -173,14 +160,12 @@ class Database:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (rid, tiploc)
                 )
-                """
-            )
+                """)
 
             # Modular stats storage - adding a new metric is "insert rows
             # with a new metric_name", never a schema change. scope_type is
             # e.g. 'station' or 'uid'; scope_value is the tiploc/uid itself.
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS daily_stats (
                     id BIGSERIAL PRIMARY KEY,
                     metric_name VARCHAR(64) NOT NULL,
@@ -191,8 +176,7 @@ class Database:
                     computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (metric_name, scope_type, scope_value, stat_date)
                 )
-                """
-            )
+                """)
 
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_live_journeys_uid_ssd ON live_journeys (uid, ssd)"
@@ -427,9 +411,7 @@ class Database:
 
     def remove_watchlist_station(self, watch_id: int) -> None:
         with self.conn.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM watchlist_stations WHERE id = %s", (watch_id,)
-            )
+            cursor.execute("DELETE FROM watchlist_stations WHERE id = %s", (watch_id,))
         self.conn.commit()
 
     def list_watchlist_stations(self) -> list[dict]:
@@ -500,7 +482,9 @@ class Database:
             return True
         except psycopg2.Error:
             self.conn.rollback()
-            logger.warning("Failed to upsert live_journey rid=%r uid=%r", rid, uid, exc_info=True)
+            logger.warning(
+                "Failed to upsert live_journey rid=%r uid=%r", rid, uid, exc_info=True
+            )
             return False
 
     def upsert_live_journey_event(
@@ -551,7 +535,10 @@ class Database:
         except psycopg2.Error:
             self.conn.rollback()
             logger.warning(
-                "Failed to upsert live_journey_event rid=%r tiploc=%r", rid, tiploc, exc_info=True
+                "Failed to upsert live_journey_event rid=%r tiploc=%r",
+                rid,
+                tiploc,
+                exc_info=True,
             )
             return False
 
@@ -631,7 +618,9 @@ class Database:
         now = datetime.now()
         today_yymmdd = now.strftime("%y%m%d")
         today_iso = now.strftime("%Y-%m-%d")
-        weekday_position = now.isoweekday()  # Monday=1 .. Sunday=7, matches CIF days_run order
+        weekday_position = (
+            now.isoweekday()
+        )  # Monday=1 .. Sunday=7, matches CIF days_run order
         now_hhmm = now.strftime("%H%M")
 
         with self.conn.cursor() as cursor:

@@ -202,13 +202,34 @@ class Watchlist:
         self.watched_tiplocs = fresh.watched_tiplocs
         self.watched_uids = fresh.watched_uids
 
-    def matches(self, train_update: TrainUpdate) -> bool:
-        """Whether this update concerns a watched train or a watched station."""
-        if train_update.uid in self.watched_uids:
-            return True
-        return any(
-            loc.tiploc in self.watched_tiplocs for loc in train_update.location
-        )
+    def matches(self, kafka_msg) -> bool:
+        """Lightweight check to see if this update concerns a watched train or a watched station."""
+        if not self.watched_tiplocs and not self.watched_uids:
+            return False
+
+        try:
+            outer_payload = json.loads(kafka_msg.value())
+            inner_payload = outer_payload.get("bytes", {})
+            if isinstance(inner_payload, str):
+                inner_payload = json.loads(inner_payload)
+
+            train_status = inner_payload.get("uR", {}).get("TS", {})
+            if not isinstance(train_status, dict):
+                return False
+
+            if train_status.get("uid") in self.watched_uids:
+                return True
+
+            locations = train_status.get("Location", [])
+            if isinstance(locations, dict):
+                locations = [locations]
+            return any(
+                isinstance(location, dict)
+                and location.get("tpl") in self.watched_tiplocs
+                for location in locations
+            )
+        except AttributeError, TypeError, ValueError, json.JSONDecodeError:
+            return False
 
 
 # Pydantic data models for timetable schedule
@@ -401,7 +422,6 @@ class Header(BaseModel):
             version=line[47:48].strip(),
             user_start_date=line[48:54].strip(),
             user_end_date=line[54:60].strip(),
-            spare=line[60:].strip(),
         )
 
 

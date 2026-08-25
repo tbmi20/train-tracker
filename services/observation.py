@@ -124,11 +124,12 @@ class Observer:
                     elif msg_error:
                         raise KafkaException(msg_error)
                 else:
+                    if not self.watchlist.matches(msg):
+                        continue
                     train_event = self.processor.parse_message(msg)
                     if train_event is None:
                         continue
-                    if self.watchlist.matches(train_event):
-                        self._persist(train_event)
+                    self._persist(train_event)
         finally:
             # Close down consumer to commit final offsets.
             self.consumer.close()
