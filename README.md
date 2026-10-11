@@ -1,12 +1,12 @@
 # Train Tracker
 
 A live UK train status + reliability dashboard, built to eventually run on a small
-always-on display showing the trains you care about and how likely they
-are to actually be on time, letting you can decide which one to catch.
+always-on display showing the trains and stations you care about and how likely they
+are to actually be on time, so you can make an informed decision on which one to catch.
 
 It pulls real-time train data from National Rail's Darwin Kafka push port and
 the Rail Data Marketplae weekly/daily CIF schedule from an S3 bucket, keeps a Postgres database
-of schedules + live running data + computed reliability stats, and serves it neatly over
+of schedules + live running data + computed reliability stats, and serves it over
 a small HTTP API.
 
 Handing over to Claude for the rest of the readme. **Do not run without checking**. This will be updated once I have checked over everything.
